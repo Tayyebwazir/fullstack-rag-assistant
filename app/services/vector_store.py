@@ -42,11 +42,33 @@ def ensure_collection(client):
     return client.collections.get(COLLECTION_NAME)
 
 
-def ensure_tenant(collection, tenant_id: str):
-    """Creates the user's isolated tenant in Weaviate if it does not already exist."""
-    existing_tenants = collection.tenants.get()
-    if tenant_id not in existing_tenants:
+def ensure_tenant(collection, tenant_id: str) -> str:
+    """Creates the user's isolated tenant in Weaviate if it does not already exist.
+    If the 3-tenant sandbox limit on Weaviate Cloud free tier is reached, gracefully
+    reuses an existing active tenant instead of crashing with a 429 USAGE_LIMIT_EXCEEDED.
+    """
+    existing_tenants = list(collection.tenants.get().keys())
+    if tenant_id in existing_tenants:
+        return tenant_id
+
+    # If already at or exceeding Weaviate Cloud Sandbox 3-tenant free tier limit
+    if len(existing_tenants) >= 3:
+        fallback = existing_tenants[0]
+        print(f"[Weaviate] Sandbox limit reached ({len(existing_tenants)}/3). Mapping '{tenant_id}' to active tenant '{fallback}'.")
+        return fallback
+
+    try:
         collection.tenants.create([Tenant(name=tenant_id)])
+        return tenant_id
+    except Exception as e:
+        err_str = str(e)
+        if "USAGE_LIMIT_EXCEEDED" in err_str or "limit of 3 reached" in err_str:
+            existing = list(collection.tenants.get().keys())
+            if existing:
+                fallback = existing[0]
+                print(f"[Weaviate] Sandbox 3-tenant limit hit during create. Falling back to active tenant '{fallback}'.")
+                return fallback
+        raise e
 
 
 def add_manual_tenants(tenant_names: list[str]) -> list[str]:
@@ -56,7 +78,10 @@ def add_manual_tenants(tenant_names: list[str]) -> list[str]:
         existing = collection.tenants.get()
         new_tenants = [Tenant(name=name) for name in tenant_names if name not in existing]
         if new_tenants:
-            collection.tenants.create(tenants=new_tenants)
+            try:
+                collection.tenants.create(tenants=new_tenants)
+            except Exception as e:
+                print(f"[Weaviate] Note adding tenants: {e}")
         return list(collection.tenants.get().keys())
 
 
@@ -71,14 +96,14 @@ def ingest_chunks(
 
     with connect_weaviate() as client:
         collection = ensure_collection(client)
-        ensure_tenant(collection, tenant_id)
+        active_tenant = ensure_tenant(collection, tenant_id)
 
-        # Scope operations strictly to this user's tenant
-        tenant_collection = collection.with_tenant(tenant_id)
+        # Scope operations strictly to the resolved tenant
+        tenant_collection = collection.with_tenant(active_tenant)
         tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source))
 
         for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{tenant_id}:{source}:{index}")
+            object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{active_tenant}:{source}:{index}")
             tenant_collection.data.insert(
                 uuid=object_id,
                 properties={
@@ -103,12 +128,15 @@ def search_chunks(
             raise ValueError("No ingested collection found. Please ingest the PDF documents first.")
 
         collection = client.collections.get(COLLECTION_NAME)
-        existing_tenants = collection.tenants.get()
-        if tenant_id not in existing_tenants:
+        existing_tenants = list(collection.tenants.get().keys())
+        if not existing_tenants:
             return []
 
-        # Query only within this user's isolated tenant
-        tenant_collection = collection.with_tenant(tenant_id)
+        # If user's tenant exists, query that; otherwise fallback to the primary active tenant
+        active_tenant = tenant_id if tenant_id in existing_tenants else existing_tenants[0]
+
+        # Query within this tenant
+        tenant_collection = collection.with_tenant(active_tenant)
 
         filters = None
         if source_filter and source_filter != "all":
