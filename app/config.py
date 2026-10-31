@@ -6,7 +6,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR /".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL","gemini-embedding-001")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
 GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gemini-3.5-flash-lite")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME","PDFChunk")
 WEAVIATE_MODE = os.getenv("WEAVIATE_MODE", os.getenv("WEAVIATE_MODEL", "local"))
