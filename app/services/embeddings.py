@@ -8,7 +8,7 @@ if not GEMINI_API_KEY:
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Ordered models to fallback on if one model's daily quota is exhausted (429)
+
 def _get_candidate_models():
     primary = EMBEDDING_MODEL or "gemini-embedding-2"
     fallbacks = ["gemini-embedding-2", "gemini-embedding-2-preview", "gemini-embedding-001"]
@@ -28,11 +28,14 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
             all_vectors = []
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
+                # In google-genai, each separate item must be passed as a types.Content
+                # to ensure 1 embedding per chunk rather than combining them into 1 single vector
+                contents = [types.Content(parts=[types.Part.from_text(text=t)]) for t in batch]
                 for attempt in range(3):
                     try:
                         response = gemini_client.models.embed_content(
                             model=model_name,
-                            contents=batch,
+                            contents=contents,
                             config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
                         )
                         vectors = [list(e.values) for e in response.embeddings]
@@ -42,10 +45,14 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
                     except Exception as e:
                         err_str = str(e).lower()
                         if "429" in err_str and attempt < 2:
-                            time.sleep(5 * (attempt + 1))
+                            time.sleep(4 * (attempt + 1))
                         else:
                             raise e
-            return all_vectors
+            if len(all_vectors) == len(texts):
+                return all_vectors
+            else:
+                print(f"[Embeddings] Length mismatch for {model_name}: got {len(all_vectors)}, expected {len(texts)}")
+                raise ValueError(f"Expected {len(texts)} embeddings but got {len(all_vectors)}")
         except Exception as e:
             err_str = str(e).lower()
             if "429" in err_str or "resource_exhausted" in err_str:

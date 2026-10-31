@@ -16,4 +16,4 @@ PDF_PATH =BASE_DIR/ os.getenv("PDF_PATH","data/your_doucment.pdf")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP= int(os.getenv("CHUNK_OVERLAP","100"))
-TOP_K = int(os.getenv("TOP_K","4"))
+TOP_K = int(os.getenv("TOP_K","5"))

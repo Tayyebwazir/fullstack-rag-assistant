@@ -44,18 +44,21 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
             "sources": [],
         }
 
-    context_parts = []
-    for chunk in chunks:
-        context_parts.append(
-            f"[source:{chunk['source']},page:{chunk['page']}]\n{chunk['content']}"
-        )
-    context = "\n\n".join(context_parts)
-    prompt = f"""You are a document question answering assistant.
+    context_parts = [chunk["content"].strip() for chunk in chunks]
+    context = "\n\n---\n\n".join(context_parts)
+    prompt = f"""You are an expert AI document assistant.
+Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
+
 Context:
 {context}
 
 Question:
 {question}
+
+Guidelines:
+- Provide high quality, well-organized explanations with Markdown formatting (use headings, bullet points, bold keywords, and code snippets when present).
+- Do NOT output citation brackets or source tags (such as [source:...], [page:...]) inside your answer text. All document sources and page locations are already presented in a dedicated visual panel.
+- Explain technical definitions and provide code examples if available in the text.
 """
 
     response = gemini_client.models.generate_content(
