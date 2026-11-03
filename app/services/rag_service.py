@@ -13,10 +13,10 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def answer_question(
     question: str,
-    tenant_id: str = "default_user",
+    tenant_id: str = "alpha",
     source_filter: str | None = None,
 ) -> dict:
-    # Handle greetings / general conversation directly without RAG
+    
     if is_conversational_or_greeting(question):
         greeting_prompt = f"""You are a helpful and polite document assistant.
 Respond naturally, politely and concisely to the following greeting or general question:

@@ -15,7 +15,15 @@ from app.config import (
 from app.services.pdf_loader import load_pdf
 from app.services.chunker import chunk_pages
 from app.services.embeddings import embed_document, embed_documents, embed_query
-from app.services.vector_store import ingest_chunks, search_chunks, ensure_collection, connect_weaviate
+from app.services.vector_store import (
+    ingest_chunks,
+    search_chunks,
+    ensure_collection,
+    connect_weaviate,
+    VALID_TENANTS,
+    TENANT_DOCUMENTS,
+    TENANT_METADATA,
+)
 from app.services.auth import get_current_user
 from app.services.intent import is_conversational_or_greeting
 try:
@@ -45,7 +53,7 @@ app.add_middleware(
 class QuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     source_filter: str | None = Field(default=None, description="Optional PDF document filter")
-    tenant_id: str | None = Field(default=None, description="Optional tenant/workspace identifier")
+    tenant_id: str | None = Field(default="alpha", description="Target multi-tenant workspace (alpha, beta, tri)")
 
 
 @app.get("/")
@@ -60,28 +68,25 @@ def get_my_profile(user: dict = Depends(get_current_user)):
 
 @app.get("/tenants")
 def get_tenants(user: dict = Depends(get_current_user)):
-    """Returns the primary tenant for this user plus two manual multi-tenancy workspaces."""
-    user_uid = user.get("uid") or "default_user"
-    return {
-        "tenants": [
-            {"id": user_uid, "name": f"Personal Workspace ({user_uid[:8]}...)"},
-            {"id": "Team_Alpha", "name": "Team Alpha Workspace"},
-            {"id": "Team_Beta", "name": "Team Beta Workspace"},
-        ]
-    }
+    """Returns the three isolated multi-tenant workspaces: alpha, beta, and tri."""
+    return {"tenants": TENANT_METADATA}
 
 
 @app.post("/ingest")
 def ingest_pdf(tenant_id: str | None = None, user: dict = Depends(get_current_user)):
     try:
-        active_tenant = tenant_id or user.get("uid") or "default_user"
+        target_tenants = [tenant_id] if tenant_id in TENANT_DOCUMENTS else list(TENANT_DOCUMENTS.keys())
         pdf_folder = PDF_PATH.parent
-        pdf_files = sorted(list(pdf_folder.glob("*.pdf"))) if pdf_folder.exists() else [PDF_PATH]
 
         total_chunks = 0
         file_summaries = []
 
-        for pdf_file in pdf_files:
+        for t in target_tenants:
+            doc_name = TENANT_DOCUMENTS[t]
+            pdf_file = pdf_folder / doc_name
+            if not pdf_file.exists():
+                continue
+
             pages = load_pdf(pdf_file)
             chunks = chunk_pages(
                 pages,
@@ -96,20 +101,17 @@ def ingest_pdf(tenant_id: str | None = None, user: dict = Depends(get_current_us
 
             count = ingest_chunks(
                 chunks=chunks,
-                source=pdf_file.name,
+                source=doc_name,
                 vectors=vectors,
-                tenant_id=active_tenant,
+                tenant_id=t,
             )
             total_chunks += count
-            file_summaries.append(f"{pdf_file.name} ({count} chunks)")
+            file_summaries.append(f"{t}: {doc_name} ({count} chunks)")
 
         return {
             "status": "success",
-            "pdf": ", ".join(file_summaries),
+            "tenants_ingested": file_summaries,
             "chunks_ingested": total_chunks,
-            "total_files": len(pdf_files),
-            "tenant_id": active_tenant,
-            "embedding_model": "gemini-embedding-2",
             "requested_by": user.get("email") or user.get("uid"),
         }
 
@@ -121,19 +123,17 @@ def ingest_pdf(tenant_id: str | None = None, user: dict = Depends(get_current_us
 
 
 @app.get("/sources")
-def get_sources():
-    """Returns the list of PDF documents available."""
-    pdf_folder = PDF_PATH.parent
-    if pdf_folder.exists():
-        files = sorted([f.name for f in pdf_folder.glob("*.pdf")])
-        return {"sources": files}
-    return {"sources": [PDF_PATH.name]}
+def get_sources(tenant_id: str | None = None):
+    """Returns the PDF document associated with the selected tenant or all."""
+    if tenant_id and tenant_id in TENANT_DOCUMENTS:
+        return {"sources": [TENANT_DOCUMENTS[tenant_id]]}
+    return {"sources": list(TENANT_DOCUMENTS.values())}
 
 
 @app.post("/ask")
 def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user)):
     try:
-        active_tenant = request.tenant_id or user.get("uid") or "default_user"
+        active_tenant = request.tenant_id if request.tenant_id in VALID_TENANTS else "alpha"
         return answer_question(
             request.question,
             tenant_id=active_tenant,
@@ -149,7 +149,7 @@ def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user
 
 @app.post("/ask-stream")
 def ask_question_stream(request: QuestionRequest, user: dict = Depends(get_current_user)):
-    active_tenant = request.tenant_id or user.get("uid") or "default_user"
+    active_tenant = request.tenant_id if request.tenant_id in VALID_TENANTS else "alpha"
 
     def event_generator():
         try:
@@ -161,7 +161,7 @@ def ask_question_stream(request: QuestionRequest, user: dict = Depends(get_curre
                 greeting_prompt = f"""You are a helpful and polite document assistant.
 Respond naturally, politely and concisely to the following greeting or general question:
 "{request.question}"
-Remind the user briefly that they can ask questions about their uploaded PDF documents."""
+Remind the user briefly that they can ask questions about their tenant's documents."""
 
                 stream = gemini_client.models.generate_content_stream(
                     model=GENERATION_MODEL,
@@ -175,7 +175,7 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
                 yield 'data: {"type": "done"}\n\n'
                 return
 
-            # 2. Document Question: Retrieve chunks & Rerank
+            # 2. Document Question: Retrieve chunks strictly within active_tenant shard & Rerank
             q_vec = embed_query(request.question)
             chunks = search_chunks(
                 query_vector=q_vec,
@@ -189,26 +189,26 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
                 "type": "metadata",
                 "chunks": chunks,
                 "reranked": reranked,
+                "tenant": active_tenant,
             })
             yield f"data: {meta_payload}\n\n"
 
             if not chunks:
                 empty_payload = json.dumps({
                     "type": "token",
-                    "token": "I could not find relevant information in the ingested document.",
+                    "token": f"No relevant information found in tenant [{active_tenant}].",
                 })
                 yield f"data: {empty_payload}\n\n"
                 yield "data: {\"type\": \"done\"}\n\n"
                 return
 
-            # Format context cleanly without source brackets to prevent LLM from emitting inline citation noise
             context_blocks = [
                 c['content'].strip()
                 for c in (reranked or chunks)
             ]
             context = "\n\n---\n\n".join(context_blocks)
 
-            prompt = f"""You are an expert AI document assistant.
+            prompt = f"""You are an expert AI document assistant for tenant [{active_tenant}].
 Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
 
 Context:

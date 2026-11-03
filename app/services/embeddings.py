@@ -13,14 +13,13 @@ _query_cache: dict[str, list[float]] = {}
 
 
 def _get_candidate_models():
-    # Enforce modern gemini-embedding-2 models which have 3072 dimensions and fresh quotas
+    # If one model's quota is exhausted (429), fall back across available 3072-dim models
+    candidates = ["gemini-embedding-001", "gemini-embedding-2", "gemini-embedding-2-preview"]
     configured = (EMBEDDING_MODEL or "").strip()
-    if configured == "gemini-embedding-001" or not configured:
-        configured = "gemini-embedding-2"
-
-    candidates = ["gemini-embedding-2", "gemini-embedding-2-preview"]
-    ordered = [configured] + [m for m in candidates if m != configured]
-    return ordered
+    if configured and configured in candidates:
+        ordered = [configured] + [m for m in candidates if m != configured]
+        return ordered
+    return candidates
 
 
 def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]:
@@ -36,7 +35,7 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
                 contents = [types.Content(parts=[types.Part.from_text(text=t)]) for t in batch]
-                for attempt in range(4):
+                for attempt in range(5):
                     try:
                         response = gemini_client.models.embed_content(
                             model=model_name,
@@ -49,9 +48,9 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
                         break
                     except Exception as e:
                         err_str = str(e).lower()
-                        if "429" in err_str and attempt < 3:
-                            wait_sec = 2 * (attempt + 1)
-                            print(f"[Embeddings] Rate limit hit on {model_name}. Waiting {wait_sec}s before retry...")
+                        if "429" in err_str and attempt < 4:
+                            wait_sec = 18 * (attempt + 1)
+                            print(f"[Embeddings] Rate limit (RPM) hit on {model_name}. Waiting {wait_sec}s for quota window reset...")
                             time.sleep(wait_sec)
                         else:
                             raise e

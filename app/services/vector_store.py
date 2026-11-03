@@ -10,6 +10,35 @@ from app.config import (
     WEAVIATE_API_KEY,
 )
 
+VALID_TENANTS = ["alpha", "beta", "tri"]
+
+TENANT_DOCUMENTS = {
+    "alpha": "Attention is all you need.pdf",
+    "beta": "LLM-based autonomous agents.pdf",
+    "tri": "OOP_15_Page_Notes.pdf",
+}
+
+TENANT_METADATA = [
+    {
+        "id": "alpha",
+        "name": "Tenant Alpha",
+        "document": "Attention is all you need.pdf",
+        "description": "Transformers & Attention Mechanism (Research Paper)",
+    },
+    {
+        "id": "beta",
+        "name": "Tenant Beta",
+        "document": "LLM-based autonomous agents.pdf",
+        "description": "Autonomous Agents, Planning & Memory (Research Paper)",
+    },
+    {
+        "id": "tri",
+        "name": "Tenant Tri",
+        "document": "OOP_15_Page_Notes.pdf",
+        "description": "Object-Oriented Programming & System Design (Study Notes)",
+    },
+]
+
 
 def connect_weaviate():
     if WEAVIATE_MODE == "cloud":
@@ -43,53 +72,22 @@ def ensure_collection(client):
 
 
 def ensure_tenant(collection, tenant_id: str) -> str:
-    """Creates the user's isolated tenant in Weaviate if it does not already exist.
-    If the 3-tenant sandbox limit on Weaviate Cloud free tier is reached, gracefully
-    reuses an existing active tenant instead of crashing with a 429 USAGE_LIMIT_EXCEEDED.
-    """
-    existing_tenants = list(collection.tenants.get().keys())
-    if tenant_id in existing_tenants:
-        return tenant_id
-
-    # If already at or exceeding Weaviate Cloud Sandbox 3-tenant free tier limit
-    if len(existing_tenants) >= 3:
-        fallback = existing_tenants[0]
-        print(f"[Weaviate] Sandbox limit reached ({len(existing_tenants)}/3). Mapping '{tenant_id}' to active tenant '{fallback}'.")
-        return fallback
-
-    try:
-        collection.tenants.create([Tenant(name=tenant_id)])
-        return tenant_id
-    except Exception as e:
-        err_str = str(e)
-        if "USAGE_LIMIT_EXCEEDED" in err_str or "limit of 3 reached" in err_str:
-            existing = list(collection.tenants.get().keys())
-            if existing:
-                fallback = existing[0]
-                print(f"[Weaviate] Sandbox 3-tenant limit hit during create. Falling back to active tenant '{fallback}'.")
-                return fallback
-        raise e
-
-
-def add_manual_tenants(tenant_names: list[str]) -> list[str]:
-    """Manually add multiple tenants to the collection."""
-    with connect_weaviate() as client:
-        collection = ensure_collection(client)
-        existing = collection.tenants.get()
-        new_tenants = [Tenant(name=name) for name in tenant_names if name not in existing]
-        if new_tenants:
-            try:
-                collection.tenants.create(tenants=new_tenants)
-            except Exception as e:
-                print(f"[Weaviate] Note adding tenants: {e}")
-        return list(collection.tenants.get().keys())
+    """Ensures the tenant is one of ['alpha', 'beta', 'tri'] and exists in Weaviate."""
+    target = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+    existing = list(collection.tenants.get().keys())
+    if target not in existing:
+        try:
+            collection.tenants.create([Tenant(name=target)])
+        except Exception as e:
+            print(f"[Weaviate] Note ensuring tenant {target}: {e}")
+    return target
 
 
 def ingest_chunks(
     chunks: list[dict],
     source: str,
     vectors: list[list[float]],
-    tenant_id: str = "default_user",
+    tenant_id: str = "alpha",
 ) -> int:
     if len(chunks) != len(vectors):
         raise ValueError("Each chunk must have exactly one vector")
@@ -98,7 +96,7 @@ def ingest_chunks(
         collection = ensure_collection(client)
         active_tenant = ensure_tenant(collection, tenant_id)
 
-        # Scope operations strictly to the resolved tenant
+        # Scope operations strictly to the authorized tenant
         tenant_collection = collection.with_tenant(active_tenant)
         tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source))
 
@@ -119,7 +117,7 @@ def ingest_chunks(
 
 def search_chunks(
     query_vector: list[float],
-    tenant_id: str = "default_user",
+    tenant_id: str = "alpha",
     source_filter: str | None = None,
     limit: int = 4,
 ) -> list[dict]:
@@ -128,15 +126,13 @@ def search_chunks(
             raise ValueError("No ingested collection found. Please ingest the PDF documents first.")
 
         collection = client.collections.get(COLLECTION_NAME)
-        existing_tenants = list(collection.tenants.get().keys())
-        if not existing_tenants:
-            return []
 
-        # If user's tenant exists, query that; otherwise fallback to the primary active tenant
-        active_tenant = tenant_id if tenant_id in existing_tenants else existing_tenants[0]
+        # Enforce strict tenant isolation: only 'alpha', 'beta', or 'tri'
+        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+        ensure_tenant(collection, target_tenant)
 
-        # Query within this tenant
-        tenant_collection = collection.with_tenant(active_tenant)
+        # Query strictly within this specific tenant's shard
+        tenant_collection = collection.with_tenant(target_tenant)
 
         filters = None
         if source_filter and source_filter != "all":
@@ -153,6 +149,7 @@ def search_chunks(
                 "page": obj.properties["page"],
                 "chunk_index": obj.properties["chunk_index"],
                 "content": obj.properties["content"],
+                "tenant": target_tenant,
             }
             for obj in response.objects
         ]
