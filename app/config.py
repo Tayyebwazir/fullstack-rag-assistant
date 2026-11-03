@@ -3,17 +3,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR /".env")
+load_dotenv(BASE_DIR / ".env")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-2")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 GENERATION_MODEL = os.getenv("GENERATION_MODEL", "gemini-3.5-flash-lite")
-COLLECTION_NAME = os.getenv("COLLECTION_NAME","PDFChunk")
-WEAVIATE_MODE = os.getenv("WEAVIATE_MODE", os.getenv("WEAVIATE_MODEL", "local"))
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "MultiTenantRAG")
+WEAVIATE_MODE = os.getenv("WEAVIATE_MODE", os.getenv("WEAVIATE_MODEL", "cloud"))
 WEAVIATE_URL = os.getenv("WEAVIATE_URL", "")
 WEAVIATE_API_KEY = os.getenv("WEAVIATE_API_KEY", "")
-PDF_PATH =BASE_DIR/ os.getenv("PDF_PATH","data/your_doucment.pdf")
+PDF_PATH = BASE_DIR / os.getenv("PDF_PATH", "app/data/Attention is all you need.pdf")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "authen-81a29")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP= int(os.getenv("CHUNK_OVERLAP","100"))
-TOP_K = int(os.getenv("TOP_K","5"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
+TOP_K = int(os.getenv("TOP_K", "5"))

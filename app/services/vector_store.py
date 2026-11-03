@@ -115,6 +115,41 @@ def ingest_chunks(
         return len(chunks)
 
 
+def delete_tenant_document(source_name: str, tenant_id: str = "alpha") -> int:
+    """Deletes all chunks belonging to source_name inside tenant_id's shard."""
+    with connect_weaviate() as client:
+        if not client.collections.exists(COLLECTION_NAME):
+            return 0
+        collection = client.collections.get(COLLECTION_NAME)
+        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+        ensure_tenant(collection, target_tenant)
+        tenant_collection = collection.with_tenant(target_tenant)
+        res = tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source_name))
+        return res.successful if hasattr(res, "successful") else 1
+
+
+def get_tenant_documents_summary(tenant_id: str = "alpha") -> list[dict]:
+    """Returns unique document sources and their chunk count in tenant_id's shard."""
+    with connect_weaviate() as client:
+        if not client.collections.exists(COLLECTION_NAME):
+            return []
+        collection = client.collections.get(COLLECTION_NAME)
+        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+        ensure_tenant(collection, target_tenant)
+        tenant_collection = collection.with_tenant(target_tenant)
+
+        objects = tenant_collection.query.fetch_objects(limit=1000).objects
+        counts = {}
+        for obj in objects:
+            src = obj.properties.get("source", "unknown")
+            counts[src] = counts.get(src, 0) + 1
+
+        return [
+            {"source": src, "chunk_count": count, "tenant": target_tenant}
+            for src, count in counts.items()
+        ]
+
+
 def search_chunks(
     query_vector: list[float],
     tenant_id: str = "alpha",
