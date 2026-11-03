@@ -12,30 +12,21 @@ from app.config import (
 
 VALID_TENANTS = ["alpha", "beta", "tri"]
 
-TENANT_DOCUMENTS = {
-    "alpha": "Attention is all you need.pdf",
-    "beta": "LLM-based autonomous agents.pdf",
-    "tri": "OOP_15_Page_Notes.pdf",
-}
-
 TENANT_METADATA = [
     {
         "id": "alpha",
         "name": "Tenant Alpha",
-        "document": "Attention is all you need.pdf",
-        "description": "Transformers & Attention Mechanism (Research Paper)",
+        "description": "Tenant Alpha Knowledge Base",
     },
     {
         "id": "beta",
         "name": "Tenant Beta",
-        "document": "LLM-based autonomous agents.pdf",
-        "description": "Autonomous Agents, Planning & Memory (Research Paper)",
+        "description": "Tenant Beta Knowledge Base",
     },
     {
         "id": "tri",
         "name": "Tenant Tri",
-        "document": "OOP_15_Page_Notes.pdf",
-        "description": "Object-Oriented Programming & System Design (Study Notes)",
+        "description": "Tenant Tri Knowledge Base",
     },
 ]
 
@@ -66,9 +57,18 @@ def ensure_collection(client):
                 Property(name="source", data_type=DataType.TEXT),
                 Property(name="page", data_type=DataType.INT),
                 Property(name="chunk_index", data_type=DataType.INT),
+                Property(name="doc_id", data_type=DataType.TEXT),
             ],
         )
-    return client.collections.get(COLLECTION_NAME)
+    collection = client.collections.get(COLLECTION_NAME)
+    # Ensure doc_id property exists if collection was created earlier
+    try:
+        props = [p.name for p in collection.config.get().properties]
+        if "doc_id" not in props:
+            collection.config.add_property(Property(name="doc_id", data_type=DataType.TEXT))
+    except Exception:
+        pass
+    return collection
 
 
 def ensure_tenant(collection, tenant_id: str) -> str:
@@ -88,7 +88,9 @@ def ingest_chunks(
     source: str,
     vectors: list[list[float]],
     tenant_id: str = "alpha",
+    doc_id: str = "",
 ) -> int:
+    """Inserts chunk vectors strictly into the authorized tenant's shard."""
     if len(chunks) != len(vectors):
         raise ValueError("Each chunk must have exactly one vector")
 
@@ -98,10 +100,17 @@ def ingest_chunks(
 
         # Scope operations strictly to the authorized tenant
         tenant_collection = collection.with_tenant(active_tenant)
+
+        # Delete any existing chunks for this doc_id or source within this tenant shard
+        if doc_id:
+            try:
+                tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
+            except Exception:
+                pass
         tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source))
 
         for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{active_tenant}:{source}:{index}")
+            object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{active_tenant}:{doc_id or source}:{index}")
             tenant_collection.data.insert(
                 uuid=object_id,
                 properties={
@@ -109,10 +118,28 @@ def ingest_chunks(
                     "source": source,
                     "page": chunk["page"],
                     "chunk_index": index,
+                    "doc_id": doc_id,
                 },
                 vector=vector,
             )
         return len(chunks)
+
+
+def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "alpha") -> int:
+    """Deletes all chunks belonging to doc_id inside the tenant's isolated shard."""
+    with connect_weaviate() as client:
+        if not client.collections.exists(COLLECTION_NAME):
+            return 0
+        collection = client.collections.get(COLLECTION_NAME)
+        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+        ensure_tenant(collection, target_tenant)
+        tenant_collection = collection.with_tenant(target_tenant)
+        try:
+            res = tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
+            return res.successful if hasattr(res, "successful") else 1
+        except Exception as exc:
+            print(f"[Weaviate] Delete error for doc_id {doc_id}: {exc}")
+            return 0
 
 
 def delete_tenant_document(source_name: str, tenant_id: str = "alpha") -> int:
@@ -158,7 +185,7 @@ def search_chunks(
 ) -> list[dict]:
     with connect_weaviate() as client:
         if not client.collections.exists(COLLECTION_NAME):
-            raise ValueError("No ingested collection found. Please ingest the PDF documents first.")
+            raise ValueError("No ingested collection found. Please ingest documents first.")
 
         collection = client.collections.get(COLLECTION_NAME)
 
@@ -180,10 +207,11 @@ def search_chunks(
         )
         return [
             {
-                "source": obj.properties["source"],
-                "page": obj.properties["page"],
-                "chunk_index": obj.properties["chunk_index"],
-                "content": obj.properties["content"],
+                "source": obj.properties.get("source", "unknown"),
+                "page": obj.properties.get("page", 1),
+                "chunk_index": obj.properties.get("chunk_index", 0),
+                "content": obj.properties.get("content", ""),
+                "doc_id": obj.properties.get("doc_id", ""),
                 "tenant": target_tenant,
             }
             for obj in response.objects

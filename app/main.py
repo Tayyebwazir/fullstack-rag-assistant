@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import json
+import os
 import shutil
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from pydantic import BaseModel, Field
 
 from app.config import (
-    PDF_PATH,
     CHUNK_SIZE,
     CHUNK_OVERLAP,
     TOP_K,
@@ -15,18 +17,18 @@ from app.config import (
     GENERATION_MODEL,
     BASE_DIR,
 )
-from app.services.pdf_loader import load_pdf
+from app.services.document_loader import load_document
 from app.services.chunker import chunk_pages
-from app.services.embeddings import embed_document, embed_documents, embed_query
+from app.services.embeddings import embed_documents, embed_query
 from app.services.vector_store import (
     ingest_chunks,
     search_chunks,
+    delete_tenant_document_by_id,
     delete_tenant_document,
     get_tenant_documents_summary,
     ensure_collection,
     connect_weaviate,
     VALID_TENANTS,
-    TENANT_DOCUMENTS,
     TENANT_METADATA,
 )
 from app.services.auth import get_current_user
@@ -34,6 +36,11 @@ from app.services.firebase_db import (
     get_user_record,
     update_user_tenant_and_permissions,
     verify_tenant_access,
+    get_tenant_documents,
+    get_document_by_id,
+    create_document_record,
+    update_document_record,
+    delete_document_record,
 )
 from app.services.intent import is_conversational_or_greeting
 try:
@@ -48,7 +55,7 @@ gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI(
     title="Multi-Tenant RAG Assistant API",
-    version="2.0.0",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -59,20 +66,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".doc"}
+MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
+
 
 class QuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
-    source_filter: str | None = Field(default=None, description="Optional PDF document filter")
-    tenant_id: str | None = Field(default="alpha", description="Target multi-tenant workspace (alpha, beta, tri)")
+    source_filter: str | None = Field(default=None, description="Optional document filter")
+    tenant_id: str | None = Field(default=None, description="Optional requested tenant")
 
 
 class SelectTenantRequest(BaseModel):
     tenant_id: str
 
 
-class DocOperationRequest(BaseModel):
-    source: str
-    tenant_id: str
+class DocIdRequest(BaseModel):
+    doc_id: str
 
 
 @app.get("/")
@@ -86,10 +95,11 @@ def home():
 
 @app.get("/user/profile")
 def get_user_profile(user: dict = Depends(get_current_user)):
-    """Fetches user UUID, assigned tenant ID, and permissions from Firebase Database."""
-    uid = user.get("uid") or "default_user"
-    email = user.get("email") or ""
-    profile = get_user_record(uid, email)
+    """Fetches user UUID, assigned tenant ID, active status, and permissions from Firebase Database."""
+    uid = user.get("uid")
+    email = user.get("email", "")
+    id_token = user.get("id_token")
+    profile = get_user_record(uid, email, id_token)
     return {
         "status": "success",
         "profile": profile,
@@ -98,209 +108,369 @@ def get_user_profile(user: dict = Depends(get_current_user)):
 
 
 @app.post("/user/select-tenant")
-def select_user_tenant(req: SelectTenantRequest, user: dict = Depends(get_current_user)):
+def select_tenant(req: SelectTenantRequest, user: dict = Depends(get_current_user)):
     """Allows the user to select/switch their active tenant in Firebase Database."""
-    uid = user.get("uid") or "default_user"
     if req.tenant_id not in VALID_TENANTS:
-        raise HTTPException(status_code=400, detail=f"Invalid tenant. Must be one of: {VALID_TENANTS}")
-    updated = update_user_tenant_and_permissions(uid=uid, tenant_id=req.tenant_id)
-    return {"status": "success", "profile": updated}
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid tenant '{req.tenant_id}'. Must be one of {VALID_TENANTS}",
+        )
 
-
-@app.get("/tenants")
-def get_tenants(user: dict = Depends(get_current_user)):
-    """Returns the three isolated multi-tenant workspaces: alpha, beta, and tri."""
-    return {"tenants": TENANT_METADATA}
+    uid = user.get("uid")
+    id_token = user.get("id_token")
+    updated = update_user_tenant_and_permissions(uid=uid, tenant_id=req.tenant_id, id_token=id_token)
+    return {
+        "status": "success",
+        "message": f"Switched active tenant to '{req.tenant_id}'",
+        "profile": updated,
+    }
 
 
 # ==========================================
-# 2. Document Operations (Upload, Ingest, Update, Delete)
+# 2. Tenant Document Management & Operations
 # ==========================================
 
 @app.get("/documents/list")
-def list_documents(tenant_id: str = "alpha", user: dict = Depends(get_current_user)):
-    """Lists documents ingested into this tenant's shard."""
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
-    
-    # Verify tenant authorisation
-    authorized, err_msg = verify_tenant_access(user_record, tenant_id, "read")
+def list_documents(user: dict = Depends(get_current_user)):
+    """Lists only the documents belonging to the authenticated user's authorized tenant."""
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
+
+    # Verify READ permission on authorized tenant
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "READ")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
-    weaviate_docs = get_tenant_documents_summary(tenant_id)
-    pdf_folder = BASE_DIR / "app" / "data"
-    local_files = [f.name for f in pdf_folder.glob("*.pdf")]
-
+    tenant_docs = get_tenant_documents(authorized_tenant)
     return {
-        "tenant": tenant_id,
-        "weaviate_documents": weaviate_docs,
-        "available_files": local_files,
+        "status": "success",
+        "tenant_id": authorized_tenant,
+        "documents": tenant_docs,
     }
 
 
 @app.post("/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
-    tenant_id: str = Form("alpha"),
     user: dict = Depends(get_current_user),
 ):
-    """Uploads a new document for the authorized tenant."""
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
+    """Uploads a new PDF, DOCX, or DOC file for the authenticated user's authorized tenant.
+    Never trusts client tenant parameter; resolves authorized tenant on the backend.
+    """
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Verify user belongs to tenant and has 'write' permission
-    authorized, err_msg = verify_tenant_access(user_record, tenant_id, "write")
+    # Verify WRITE permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "WRITE")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    # Validate file extension
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Supported formats: PDF, DOCX, DOC.",
+        )
 
-    save_path = BASE_DIR / "app" / "data" / file.filename
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(save_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    # Read and validate file size
+    contents = await file.read()
+    file_size = len(contents)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File size exceeds the 25MB limit.")
 
+    # Generate unique document UUID and save to tenant-specific isolated directory
+    doc_id = str(uuid.uuid4())
+    safe_filename = Path(file.filename).name.replace(" ", "_")
+    tenant_upload_dir = BASE_DIR / "app" / "data" / "tenants" / authorized_tenant
+    tenant_upload_dir.mkdir(parents=True, exist_ok=True)
+    save_path = tenant_upload_dir / f"{doc_id}_{safe_filename}"
+
+    with open(save_path, "wb") as f:
+        f.write(contents)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    doc_record = {
+        "doc_id": doc_id,
+        "tenant_id": authorized_tenant,
+        "owner_uid": uid,
+        "filename": file.filename,
+        "file_type": ext.replace(".", "").upper(),
+        "file_path": str(save_path),
+        "file_size": file_size,
+        "upload_timestamp": now_iso,
+        "updated_timestamp": now_iso,
+        "version": 1,
+        "status": "uploaded",
+        "chunk_count": 0,
+        "error_message": None,
+    }
+
+    created = create_document_record(doc_record, user.get("id_token"))
     return {
         "status": "success",
-        "message": f"Document '{file.filename}' uploaded for tenant '{tenant_id}'. Ready for ingestion.",
-        "filename": file.filename,
-        "tenant_id": tenant_id,
+        "message": f"Document '{file.filename}' uploaded successfully for Tenant '{authorized_tenant}'.",
+        "document": created,
     }
 
 
 @app.post("/documents/ingest")
-def ingest_document(req: DocOperationRequest, user: dict = Depends(get_current_user)):
-    """Chunks, embeds, and ingests a document into the authorized tenant's shard."""
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
+def ingest_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
+    """Chunks, embeds, and ingests an uploaded document into the authorized tenant's Weaviate shard."""
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Verify user belongs to tenant and has 'ingest' permission
-    authorized, err_msg = verify_tenant_access(user_record, req.tenant_id, "ingest")
+    # Verify INGEST permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "INGEST")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
-    pdf_file = BASE_DIR / "app" / "data" / req.source
-    if not pdf_file.exists():
-        raise HTTPException(status_code=404, detail=f"File '{req.source}' not found on server.")
+    doc = get_document_by_id(req.doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document with ID '{req.doc_id}' not found.")
+
+    # Strictly enforce tenant ownership
+    if doc.get("tenant_id") != authorized_tenant:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access Denied: Document '{req.doc_id}' belongs to another tenant.",
+        )
+
+    file_path = Path(doc.get("file_path", ""))
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Underlying document file not found on server.")
+
+    # Update status to processing
+    update_document_record(req.doc_id, {"status": "processing", "error_message": None}, user.get("id_token"))
 
     try:
-        pages = load_pdf(pdf_file)
+        pages = load_document(file_path)
         chunks = chunk_pages(pages, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
         if not chunks:
-            raise HTTPException(status_code=400, detail="No readable text found in document.")
+            raise ValueError("No readable text found to chunk in the document.")
 
         contents = [c["content"] for c in chunks]
         vectors = embed_documents(contents)
 
         count = ingest_chunks(
             chunks=chunks,
-            source=pdf_file.name,
+            source=doc.get("filename", file_path.name),
             vectors=vectors,
-            tenant_id=req.tenant_id,
+            tenant_id=authorized_tenant,
+            doc_id=doc.get("doc_id", ""),
+        )
+
+        updated_doc = update_document_record(
+            req.doc_id,
+            {
+                "status": "completed",
+                "chunk_count": count,
+                "error_message": None,
+                "updated_timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            user.get("id_token"),
         )
 
         return {
             "status": "success",
-            "message": f"Successfully ingested {count} chunks of '{req.source}' into tenant '{req.tenant_id}'!",
+            "message": f"Successfully ingested {count} chunks of '{doc.get('filename')}' into Tenant '{authorized_tenant}'.",
             "chunks_ingested": count,
-            "source": req.source,
-            "tenant_id": req.tenant_id,
+            "document": updated_doc,
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        update_document_record(
+            req.doc_id,
+            {"status": "failed", "error_message": str(exc)},
+            user.get("id_token"),
+        )
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
 
 
 @app.put("/documents/update")
 async def update_document(
+    doc_id: str = Form(...),
     file: UploadFile = File(...),
-    tenant_id: str = Form("alpha"),
     user: dict = Depends(get_current_user),
 ):
-    """Updates an existing document and re-ingests vectors into the tenant shard."""
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
+    """Replaces an existing document with a new version, re-extracts, re-chunks,
+    and updates vector embeddings in the authorized tenant's shard safely.
+    """
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Verify user belongs to tenant and has 'update' permission
-    authorized, err_msg = verify_tenant_access(user_record, tenant_id, "update")
+    # Verify UPDATE permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "UPDATE")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
-    # Overwrite file
-    save_path = BASE_DIR / "app" / "data" / file.filename
-    with open(save_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    doc = get_document_by_id(doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document with ID '{doc_id}' not found.")
 
-    # Re-embed and update Weaviate tenant shard
-    pages = load_pdf(save_path)
-    chunks = chunk_pages(pages, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
-    contents = [c["content"] for c in chunks]
-    vectors = embed_documents(contents)
+    if doc.get("tenant_id") != authorized_tenant:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access Denied: Document '{doc_id}' belongs to another tenant.",
+        )
 
-    count = ingest_chunks(
-        chunks=chunks,
-        source=file.filename,
-        vectors=vectors,
-        tenant_id=tenant_id,
-    )
+    # Validate replacement file format
+    ext = Path(file.filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file format '{ext}'. Supported formats: PDF, DOCX, DOC.",
+        )
 
-    return {
-        "status": "success",
-        "message": f"Document '{file.filename}' updated and re-ingested with {count} chunks in tenant '{tenant_id}'.",
-        "chunks_ingested": count,
-        "tenant_id": tenant_id,
-    }
+    contents = await file.read()
+    file_size = len(contents)
+    if file_size == 0:
+        raise HTTPException(status_code=400, detail="Replacement file is empty.")
+    if file_size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="File size exceeds the 25MB limit.")
+
+    # Save new version to a staged path first to protect the existing document
+    new_version = doc.get("version", 1) + 1
+    safe_filename = Path(file.filename).name.replace(" ", "_")
+    tenant_upload_dir = BASE_DIR / "app" / "data" / "tenants" / authorized_tenant
+    tenant_upload_dir.mkdir(parents=True, exist_ok=True)
+    staged_path = tenant_upload_dir / f"{doc_id}_v{new_version}_{safe_filename}"
+
+    with open(staged_path, "wb") as f:
+        f.write(contents)
+
+    try:
+        pages = load_document(staged_path)
+        chunks = chunk_pages(pages, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
+        chunk_contents = [c["content"] for c in chunks]
+        vectors = embed_documents(chunk_contents)
+
+        # Delete previous vectors for this doc_id
+        delete_tenant_document_by_id(doc_id, authorized_tenant)
+
+        # Ingest new chunks
+        count = ingest_chunks(
+            chunks=chunks,
+            source=file.filename,
+            vectors=vectors,
+            tenant_id=authorized_tenant,
+            doc_id=doc_id,
+        )
+
+        # Remove old file if it existed and is different from staged
+        old_path = Path(doc.get("file_path", ""))
+        if old_path.exists() and old_path != staged_path:
+            try:
+                old_path.unlink()
+            except Exception:
+                pass
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updated_doc = update_document_record(
+            doc_id,
+            {
+                "filename": file.filename,
+                "file_type": ext.replace(".", "").upper(),
+                "file_path": str(staged_path),
+                "file_size": file_size,
+                "version": new_version,
+                "status": "completed",
+                "chunk_count": count,
+                "updated_timestamp": now_iso,
+                "error_message": None,
+            },
+            user.get("id_token"),
+        )
+
+        return {
+            "status": "success",
+            "message": f"Document updated to version {new_version} and re-ingested with {count} chunks in Tenant '{authorized_tenant}'.",
+            "document": updated_doc,
+        }
+    except Exception as exc:
+        # Cleanup staged file if processing failed, keeping original document intact
+        if staged_path.exists():
+            try:
+                staged_path.unlink()
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"Update failed. Original document remained safe: {exc}",
+        ) from exc
 
 
 @app.delete("/documents/delete")
-def delete_document(req: DocOperationRequest, user: dict = Depends(get_current_user)):
-    """Deletes all chunks of a document from the tenant's Weaviate shard."""
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
+def delete_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
+    """Permanently deletes a document belonging to the authenticated tenant,
+    removing its stored file, metadata record, and all vector chunks from Weaviate.
+    """
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Verify user belongs to tenant and has 'delete' permission
-    authorized, err_msg = verify_tenant_access(user_record, req.tenant_id, "delete")
+    # Verify DELETE permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "DELETE")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
-    deleted_count = delete_tenant_document(source_name=req.source, tenant_id=req.tenant_id)
+    doc = get_document_by_id(req.doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document with ID '{req.doc_id}' not found.")
+
+    if doc.get("tenant_id") != authorized_tenant:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access Denied: Document '{req.doc_id}' belongs to another tenant.",
+        )
+
+    # 1. Remove vector chunks from Weaviate
+    delete_tenant_document_by_id(doc.get("doc_id", ""), authorized_tenant)
+    delete_tenant_document(doc.get("filename", ""), authorized_tenant)
+
+    # 2. Remove file from storage
+    file_path = Path(doc.get("file_path", ""))
+    if file_path.exists():
+        try:
+            file_path.unlink()
+        except Exception as e:
+            print(f"[FileStorage] Deletion note: {e}")
+
+    # 3. Remove metadata record from Firebase DB
+    delete_document_record(req.doc_id, user.get("id_token"))
 
     return {
         "status": "success",
-        "message": f"Deleted document '{req.source}' from tenant '{req.tenant_id}' shard.",
-        "tenant_id": req.tenant_id,
-        "source": req.source,
+        "message": f"Permanently deleted document '{doc.get('filename')}' from Tenant '{authorized_tenant}'.",
+        "doc_id": req.doc_id,
+        "tenant_id": authorized_tenant,
     }
 
 
-@app.get("/sources")
-def get_sources(tenant_id: str | None = None):
-    """Returns the document associated with the selected tenant or all."""
-    if tenant_id and tenant_id in TENANT_DOCUMENTS:
-        return {"sources": [TENANT_DOCUMENTS[tenant_id]]}
-    return {"sources": list(TENANT_DOCUMENTS.values())}
-
-
 # ==========================================
-# 3. Query & SSE Streaming (With Tenant Authorisation)
+# 3. Query & SSE Streaming (Strict Tenant Isolation)
 # ==========================================
 
 @app.post("/ask")
 def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user)):
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
-    target_tenant = request.tenant_id if request.tenant_id in VALID_TENANTS else "alpha"
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Enforce tenant authorisation for reading
-    authorized, err_msg = verify_tenant_access(user_record, target_tenant, "read")
+    # Enforce READ permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "READ")
     if not authorized:
         raise HTTPException(status_code=403, detail=err_msg)
 
     try:
         return answer_question(
             request.question,
-            tenant_id=target_tenant,
+            tenant_id=authorized_tenant,
             source_filter=request.source_filter,
         )
     except Exception as exc:
@@ -309,12 +479,12 @@ def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user
 
 @app.post("/ask-stream")
 def ask_question_stream(request: QuestionRequest, user: dict = Depends(get_current_user)):
-    uid = user.get("uid") or "default_user"
-    user_record = get_user_record(uid, user.get("email", ""))
-    target_tenant = request.tenant_id if request.tenant_id in VALID_TENANTS else "alpha"
+    uid = user.get("uid")
+    user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    authorized_tenant = user_record.get("tenant_id", "alpha")
 
-    # Enforce tenant authorisation
-    authorized, err_msg = verify_tenant_access(user_record, target_tenant, "read")
+    # Enforce READ permission
+    authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, "READ")
     if not authorized:
         def auth_error_stream():
             payload = json.dumps({"type": "error", "error": f"403 Forbidden - {err_msg}"})
@@ -328,7 +498,7 @@ def ask_question_stream(request: QuestionRequest, user: dict = Depends(get_curre
                 empty_meta = json.dumps({"type": "metadata", "chunks": [], "reranked": []})
                 yield f"data: {empty_meta}\n\n"
 
-                greeting_prompt = f"""You are a helpful and polite document assistant for tenant [{target_tenant}].
+                greeting_prompt = f"""You are a helpful and polite document assistant for tenant [{authorized_tenant}].
 Respond naturally, politely and concisely to the following greeting or general question:
 "{request.question}"
 Remind the user briefly that they can ask questions about documents in their authorized tenant."""
@@ -345,11 +515,11 @@ Remind the user briefly that they can ask questions about documents in their aut
                 yield 'data: {"type": "done"}\n\n'
                 return
 
-            # 2. Document Question: Retrieve chunks strictly within active_tenant shard & Rerank
+            # 2. Document Question: Retrieve chunks strictly within active authorized tenant shard & Rerank
             q_vec = embed_query(request.question)
             chunks = search_chunks(
                 query_vector=q_vec,
-                tenant_id=target_tenant,
+                tenant_id=authorized_tenant,
                 source_filter=request.source_filter,
                 limit=TOP_K,
             )
@@ -359,17 +529,17 @@ Remind the user briefly that they can ask questions about documents in their aut
                 "type": "metadata",
                 "chunks": chunks,
                 "reranked": reranked,
-                "tenant": target_tenant,
+                "tenant": authorized_tenant,
             })
             yield f"data: {meta_payload}\n\n"
 
             if not chunks:
                 empty_payload = json.dumps({
                     "type": "token",
-                    "token": f"No relevant information found in tenant [{target_tenant}].",
+                    "token": f"No relevant information found in tenant [{authorized_tenant}].",
                 })
                 yield f"data: {empty_payload}\n\n"
-                yield "data: {\"type\": \"done\"}\n\n"
+                yield 'data: {"type": "done"}\n\n'
                 return
 
             context_blocks = [
@@ -378,7 +548,7 @@ Remind the user briefly that they can ask questions about documents in their aut
             ]
             context = "\n\n---\n\n".join(context_blocks)
 
-            prompt = f"""You are an expert AI document assistant for tenant [{target_tenant}].
+            prompt = f"""You are an expert AI document assistant for tenant [{authorized_tenant}].
 Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
 
 Context:
@@ -404,7 +574,7 @@ Guidelines:
                     })
                     yield f"data: {token_payload}\n\n"
 
-            yield "data: {\"type\": \"done\"}\n\n"
+            yield 'data: {"type": "done"}\n\n'
 
         except Exception as err:
             err_payload = json.dumps({

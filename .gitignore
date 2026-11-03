@@ -60,3 +60,7 @@ yarn-error.log*
 *.swo
 .DS_Store
 Thumbs.db
+
+# Runtime data & uploads
+app/data/firebase_*.json
+app/data/tenants/

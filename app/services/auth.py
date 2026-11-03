@@ -16,7 +16,7 @@ def get_current_user(
     """
     FastAPI dependency that cryptographically verifies the Firebase JWT ID token
     using Google's official public certificate endpoints.
-    Does not require complex Google Cloud ADC or local service accounts.
+    Extracts the user's UID and provides authenticated context.
     """
     if not auth_header or not auth_header.credentials:
         raise HTTPException(
@@ -35,11 +35,20 @@ def get_current_user(
             audience=FIREBASE_PROJECT_ID,
         )
 
+        uid = decoded_token.get("user_id") or decoded_token.get("sub")
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload: missing user UID.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         return {
-            "uid": decoded_token.get("user_id") or decoded_token.get("sub"),
+            "uid": uid,
             "email": decoded_token.get("email", ""),
             "name": decoded_token.get("name", ""),
             "picture": decoded_token.get("picture", ""),
+            "id_token": token,
         }
     except ValueError as exc:
         raise HTTPException(
@@ -47,6 +56,8 @@ def get_current_user(
             detail=f"Invalid or expired authentication token: {exc}",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
