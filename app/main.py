@@ -28,13 +28,10 @@ from app.services.vector_store import (
     get_tenant_documents_summary,
     ensure_collection,
     connect_weaviate,
-    VALID_TENANTS,
-    TENANT_METADATA,
 )
 from app.services.auth import get_current_user
 from app.services.firebase_db import (
     get_user_record,
-    update_user_tenant_and_permissions,
     verify_tenant_access,
     get_tenant_documents,
     get_document_by_id,

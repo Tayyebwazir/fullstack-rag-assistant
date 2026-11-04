@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,11 +10,10 @@ USERS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_users.json"
 DOCUMENTS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_documents.json"
 
 DEFAULT_PERMISSIONS = ["READ", "WRITE", "UPDATE", "DELETE", "INGEST"]
-VALID_TENANTS = ["alpha", "beta", "tri"]
 
 
 # ==========================================
-# User Storage & Authentication Verification
+# User Storage & Dynamic Firestore Sync
 # ==========================================
 
 def _load_local_users() -> dict:
@@ -32,111 +32,124 @@ def _save_local_users(data: dict):
         json.dump(data, f, indent=2)
 
 
-def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict | None:
-    """Fetches user UUID, tenant ID, active status, and permissions from Firebase Database (Firestore).
-    Requires the user to be manually registered in Firestore under users/{uid}.
+def _generate_dynamic_tenant_id(email: str, uid: str) -> str:
+    """Generates a clean dynamic tenant identifier from email or UID."""
+    if email and "@" in email:
+        username = email.split("@")[0]
+        clean = re.sub(r"[^a-zA-Z0-9_]", "_", username).strip("_").lower()
+        if clean:
+            return clean
+    return f"tenant_{uid[:8].lower()}"
+
+
+def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
+    """Fetches user record from Firebase Firestore.
+    If the user does not exist in Firestore yet, AUTOMATICALLY creates their record
+    with their UID, email, and dynamic tenant_id without manual entry.
     """
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # 1. First, check Firebase Firestore REST API if id_token provided
+    # 1. Query Firestore REST API if id_token provided
+    firestore_found = False
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
             headers = {"Authorization": f"Bearer {id_token}"}
             resp = requests.get(url, headers=headers, timeout=5)
+
             if resp.status_code == 200:
                 fields = resp.json().get("fields", {})
-                tenant = fields.get("tenant_id", {}).get("stringValue", "alpha")
+                tenant = fields.get("tenant_id", {}).get("stringValue", "").strip()
+                if not tenant:
+                    tenant = _generate_dynamic_tenant_id(email, uid)
                 is_active = fields.get("is_active", {}).get("booleanValue", True)
                 perms_array = fields.get("permissions", {}).get("arrayValue", {}).get("values", [])
                 perms = [p.get("stringValue").upper() for p in perms_array if p.get("stringValue")] or DEFAULT_PERMISSIONS
+                user_email = fields.get("email", {}).get("stringValue", email)
+
                 firestore_record = {
                     "uid": uid,
                     "user_uuid": uid,
-                    "email": fields.get("email", {}).get("stringValue", email),
-                    "tenant_id": tenant if tenant in VALID_TENANTS else "alpha",
+                    "email": user_email,
+                    "tenant_id": tenant,
                     "is_active": is_active,
                     "permissions": perms,
                     "last_login": now_iso,
                 }
-                # Sync to local cache
                 local_data[uid] = firestore_record
                 _save_local_users(local_data)
                 return firestore_record
+
             elif resp.status_code == 404:
-                # Explicitly not found in Firestore
-                pass
+                # Document does not exist yet -> We will automatically create it below
+                firestore_found = False
+
         except Exception as e:
             print(f"[FirebaseDB] Firestore lookup note: {e}")
 
-    # 2. Check local persistent store
+    # 2. Check local store if user was already created
     if uid in local_data:
         record = local_data[uid]
         record["last_login"] = now_iso
         if email and not record.get("email"):
             record["email"] = email
-        if "user_uuid" not in record:
-            record["user_uuid"] = uid
-        record["permissions"] = [p.upper() for p in record.get("permissions", DEFAULT_PERMISSIONS)]
+        if not record.get("tenant_id"):
+            record["tenant_id"] = _generate_dynamic_tenant_id(email, uid)
         _save_local_users(local_data)
         return record
 
-    # User is not registered in Firestore or local database
-    return None
+    # 3. AUTOMATIC CREATION: User logs in for the first time
+    dynamic_tenant = _generate_dynamic_tenant_id(email, uid)
+    new_record = {
+        "uid": uid,
+        "user_uuid": uid,
+        "email": email,
+        "tenant_id": dynamic_tenant,
+        "is_active": True,
+        "permissions": DEFAULT_PERMISSIONS,
+        "created_at": now_iso,
+        "last_login": now_iso,
+    }
 
-
-def update_user_tenant_and_permissions(
-    uid: str,
-    tenant_id: str,
-    permissions: list[str] | None = None,
-    id_token: str | None = None,
-) -> dict:
-    """Updates the user's active tenant assignment and permissions."""
-    if tenant_id not in VALID_TENANTS:
-        raise ValueError(f"Invalid tenant '{tenant_id}'. Must be one of: {VALID_TENANTS}")
-
-    perms = [p.upper() for p in permissions] if permissions is not None else DEFAULT_PERMISSIONS
-    local_data = _load_local_users()
-    current = local_data.get(uid, {"uid": uid, "user_uuid": uid, "email": "", "is_active": True})
-    current["tenant_id"] = tenant_id
-    current["permissions"] = perms
-    local_data[uid] = current
-    _save_local_users(local_data)
-
-    # Sync to Firestore if token available
+    # Automatically persist to Firebase Firestore
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
             payload = {
                 "fields": {
-                    "uid": {"stringValue": uid},
-                    "user_uuid": {"stringValue": uid},
-                    "tenant_id": {"stringValue": tenant_id},
-                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in perms]}},
+                    "email": {"stringValue": email or ""},
+                    "tenant_id": {"stringValue": dynamic_tenant},
+                    "is_active": {"booleanValue": True},
+                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}},
                 }
             }
-            requests.patch(url, headers={"Authorization": f"Bearer {id_token}"}, json=payload, timeout=3)
-        except Exception:
-            pass
+            resp = requests.patch(
+                url,
+                headers={"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=5,
+            )
+            print(f"[FirebaseDB] Automatically created user '{uid}' in Firestore with tenant '{dynamic_tenant}' (status {resp.status_code})")
+        except Exception as err:
+            print(f"[FirebaseDB] Auto-create Firestore note: {err}")
 
-    return current
+    # Save to local cache
+    local_data[uid] = new_record
+    _save_local_users(local_data)
+    return new_record
 
 
 def verify_tenant_access(user_record: dict | None, target_tenant: str, required_permission: str) -> tuple[bool, str]:
     """Enforces:
-    1. User ID is registered in Firebase Database.
+    1. User record exists.
     2. User account is active.
     3. User belongs to requested tenant.
     4. User possesses the required permission.
     """
     if not user_record:
-        return (
-            False,
-            "Access Denied: Your User ID has not been registered in the database. Please contact an administrator to assign you a tenant.",
-        )
+        return (False, "Access Denied: User profile could not be loaded.")
 
-    # 1. Active Account Check
     if not user_record.get("is_active", True):
         return (False, "Account Suspended: Your user account is inactive. Please contact your administrator.")
 
@@ -144,18 +157,17 @@ def verify_tenant_access(user_record: dict | None, target_tenant: str, required_
     if not user_tenant:
         return (False, "Configuration Error: No tenant assigned to your account.")
 
-    raw_perms = user_record.get("permissions", [])
-    user_perms = [p.upper() for p in raw_perms]
-    req_perm = required_permission.upper()
-
-    # 2. Strict Single Tenant Check
+    # Single Tenant Isolation Check
     if target_tenant != user_tenant:
         return (
             False,
             f"Tenant Authorisation Failed: You are only authorized to access tenant '{user_tenant}'.",
         )
 
-    # 3. Permission Check
+    raw_perms = user_record.get("permissions", [])
+    user_perms = [p.upper() for p in raw_perms]
+    req_perm = required_permission.upper()
+
     if req_perm not in user_perms:
         return (
             False,
@@ -214,7 +226,7 @@ def create_document_record(doc_data: dict, id_token: str | None = None) -> dict:
     # Sync to Firestore if token available
     if FIREBASE_PROJECT_ID and id_token:
         try:
-            tenant_id = doc_data.get("tenant_id", "alpha")
+            tenant_id = doc_data.get("tenant_id", "default")
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
             fields = {
                 "doc_id": {"stringValue": doc_id},
@@ -245,7 +257,7 @@ def update_document_record(doc_id: str, updates: dict, id_token: str | None = No
     # Sync to Firestore if token available
     if FIREBASE_PROJECT_ID and id_token:
         try:
-            tenant_id = docs[doc_id].get("tenant_id", "alpha")
+            tenant_id = docs[doc_id].get("tenant_id", "default")
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
             fields = {}
             for k, v in updates.items():
@@ -267,7 +279,7 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
     """Permanently deletes a document record from Firebase Database."""
     docs = _load_local_documents()
     if doc_id in docs:
-        tenant_id = docs[doc_id].get("tenant_id", "alpha")
+        tenant_id = docs[doc_id].get("tenant_id", "default")
         del docs[doc_id]
         _save_local_documents(docs)
 

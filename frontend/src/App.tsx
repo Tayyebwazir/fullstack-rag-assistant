@@ -93,13 +93,8 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Multi-Tenancy & Authorization States
-  const [tenants, setTenants] = useState<TenantMetadata[]>([
-    { id: 'alpha', name: 'Tenant Alpha', description: 'Tenant Alpha Knowledge Base' },
-    { id: 'beta', name: 'Tenant Beta', description: 'Tenant Beta Knowledge Base' },
-    { id: 'tri', name: 'Tenant Tri', description: 'Tenant Tri Knowledge Base' },
-  ]);
-  const [selectedTenant, setSelectedTenant] = useState<string>('alpha');
+  // Dynamic Multi-Tenancy & Authorization States
+  const [selectedTenant, setSelectedTenant] = useState<string>('');
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   // Tenant Documents
@@ -164,7 +159,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok && data.profile) {
         setUserProfile(data.profile);
-        setSelectedTenant(data.profile.tenant_id || 'alpha');
+        setSelectedTenant(data.profile.tenant_id || data.assigned_tenant || '');
         setErrorMsg(null);
       } else {
         setErrorMsg(data.detail || 'Access Denied: Your User ID has not been registered in the database.');

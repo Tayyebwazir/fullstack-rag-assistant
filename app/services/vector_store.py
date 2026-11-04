@@ -10,26 +10,6 @@ from app.config import (
     WEAVIATE_API_KEY,
 )
 
-VALID_TENANTS = ["alpha", "beta", "tri"]
-
-TENANT_METADATA = [
-    {
-        "id": "alpha",
-        "name": "Tenant Alpha",
-        "description": "Tenant Alpha Knowledge Base",
-    },
-    {
-        "id": "beta",
-        "name": "Tenant Beta",
-        "description": "Tenant Beta Knowledge Base",
-    },
-    {
-        "id": "tri",
-        "name": "Tenant Tri",
-        "description": "Tenant Tri Knowledge Base",
-    },
-]
-
 
 def connect_weaviate():
     if WEAVIATE_MODE == "cloud":
@@ -72,12 +52,13 @@ def ensure_collection(client):
 
 
 def ensure_tenant(collection, tenant_id: str) -> str:
-    """Ensures the tenant is one of ['alpha', 'beta', 'tri'] and exists in Weaviate."""
-    target = tenant_id if tenant_id in VALID_TENANTS else "alpha"
+    """Dynamically creates the tenant shard in Weaviate if it does not already exist."""
+    target = tenant_id.strip() if tenant_id and tenant_id.strip() else "default"
     existing = list(collection.tenants.get().keys())
     if target not in existing:
         try:
             collection.tenants.create([Tenant(name=target)])
+            print(f"[Weaviate] Dynamically provisioned new tenant shard: '{target}'")
         except Exception as e:
             print(f"[Weaviate] Note ensuring tenant {target}: {e}")
     return target
@@ -87,10 +68,10 @@ def ingest_chunks(
     chunks: list[dict],
     source: str,
     vectors: list[list[float]],
-    tenant_id: str = "alpha",
+    tenant_id: str = "default",
     doc_id: str = "",
 ) -> int:
-    """Inserts chunk vectors strictly into the authorized tenant's shard."""
+    """Inserts chunk vectors strictly into the dynamically authorized tenant's shard."""
     if len(chunks) != len(vectors):
         raise ValueError("Each chunk must have exactly one vector")
 
@@ -98,10 +79,8 @@ def ingest_chunks(
         collection = ensure_collection(client)
         active_tenant = ensure_tenant(collection, tenant_id)
 
-        # Scope operations strictly to the authorized tenant
         tenant_collection = collection.with_tenant(active_tenant)
 
-        # Delete any existing chunks for this doc_id or source within this tenant shard
         if doc_id:
             try:
                 tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
@@ -125,14 +104,13 @@ def ingest_chunks(
         return len(chunks)
 
 
-def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "alpha") -> int:
+def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "default") -> int:
     """Deletes all chunks belonging to doc_id inside the tenant's isolated shard."""
     with connect_weaviate() as client:
         if not client.collections.exists(COLLECTION_NAME):
             return 0
         collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
-        ensure_tenant(collection, target_tenant)
+        target_tenant = ensure_tenant(collection, tenant_id)
         tenant_collection = collection.with_tenant(target_tenant)
         try:
             res = tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
@@ -142,27 +120,25 @@ def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "alpha") -> int:
             return 0
 
 
-def delete_tenant_document(source_name: str, tenant_id: str = "alpha") -> int:
+def delete_tenant_document(source_name: str, tenant_id: str = "default") -> int:
     """Deletes all chunks belonging to source_name inside tenant_id's shard."""
     with connect_weaviate() as client:
         if not client.collections.exists(COLLECTION_NAME):
             return 0
         collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
-        ensure_tenant(collection, target_tenant)
+        target_tenant = ensure_tenant(collection, tenant_id)
         tenant_collection = collection.with_tenant(target_tenant)
         res = tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source_name))
         return res.successful if hasattr(res, "successful") else 1
 
 
-def get_tenant_documents_summary(tenant_id: str = "alpha") -> list[dict]:
+def get_tenant_documents_summary(tenant_id: str = "default") -> list[dict]:
     """Returns unique document sources and their chunk count in tenant_id's shard."""
     with connect_weaviate() as client:
         if not client.collections.exists(COLLECTION_NAME):
             return []
         collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
-        ensure_tenant(collection, target_tenant)
+        target_tenant = ensure_tenant(collection, tenant_id)
         tenant_collection = collection.with_tenant(target_tenant)
 
         objects = tenant_collection.query.fetch_objects(limit=1000).objects
@@ -179,7 +155,7 @@ def get_tenant_documents_summary(tenant_id: str = "alpha") -> list[dict]:
 
 def search_chunks(
     query_vector: list[float],
-    tenant_id: str = "alpha",
+    tenant_id: str = "default",
     source_filter: str | None = None,
     limit: int = 4,
 ) -> list[dict]:
@@ -188,12 +164,7 @@ def search_chunks(
             raise ValueError("No ingested collection found. Please ingest documents first.")
 
         collection = client.collections.get(COLLECTION_NAME)
-
-        # Enforce strict tenant isolation: only 'alpha', 'beta', or 'tri'
-        target_tenant = tenant_id if tenant_id in VALID_TENANTS else "alpha"
-        ensure_tenant(collection, target_tenant)
-
-        # Query strictly within this specific tenant's shard
+        target_tenant = ensure_tenant(collection, tenant_id)
         tenant_collection = collection.with_tenant(target_tenant)
 
         filters = None
