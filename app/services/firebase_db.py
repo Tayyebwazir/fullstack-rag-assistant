@@ -31,12 +31,13 @@ def _save_local_users(data: dict):
         json.dump(data, f, indent=2)
 
 
-def _get_tenant_from_weaviate(local_data: dict) -> str:
-    """Retrieves existing tenant shards directly from Weaviate DB and assigns an authentic tenant.
-    Never uses email to generate tenant names.
+def _assign_unique_tenant_for_user(uid: str, local_data: dict) -> str:
+    """Assigns a strictly UNIQUE tenant shard for each user directly from Weaviate DB.
+    Guarantees no two users share the same tenant.
     """
     try:
-        from app.services.vector_store import get_weaviate_tenants
+        from app.services.vector_store import get_weaviate_tenants, connect_weaviate, COLLECTION_NAME
+        from weaviate.classes.tenants import Tenant
         weaviate_tenants = get_weaviate_tenants()
     except Exception:
         weaviate_tenants = []
@@ -44,41 +45,55 @@ def _get_tenant_from_weaviate(local_data: dict) -> str:
     if not weaviate_tenants:
         weaviate_tenants = ["alpha", "beta", "tri"]
 
-    # Prefer 'alpha' if available so user has immediate access to existing documents
-    if "alpha" in weaviate_tenants:
-        return "alpha"
+    # Collect all tenants currently assigned to OTHER users
+    other_assigned_tenants = {
+        user_info.get("tenant_id") for other_uid, user_info in local_data.items()
+        if other_uid != uid and user_info.get("tenant_id")
+    }
 
-    return weaviate_tenants[0]
+    # If this user already has an assigned tenant that no one else has, keep it
+    current_user_tenant = local_data.get(uid, {}).get("tenant_id")
+    if current_user_tenant and current_user_tenant not in other_assigned_tenants:
+        return current_user_tenant
+
+    # Find a Weaviate tenant shard not taken by any other user
+    available = [t for t in weaviate_tenants if t not in other_assigned_tenants]
+
+    if available:
+        available.sort()
+        return available[0]
+
+    # If all existing Weaviate shards are assigned, dynamically create a new tenant shard in Weaviate!
+    new_tenant = f"tenant_{uid[:8].lower()}"
+    try:
+        with connect_weaviate() as client:
+            if client.collections.exists(COLLECTION_NAME):
+                col = client.collections.get(COLLECTION_NAME)
+                col.tenants.create([Tenant(name=new_tenant)])
+                print(f"[Weaviate] Dynamically provisioned dedicated tenant shard: '{new_tenant}'")
+    except Exception as e:
+        print(f"[Weaviate] Note provisioning shard {new_tenant}: {e}")
+
+    return new_tenant
 
 
 def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
-    """Fetches user record from Firebase Firestore.
-    Assigns tenant_id directly from Weaviate DB (not email) and stores it in Firestore.
-    Always guarantees the user document is persisted in Firestore under users/{uid}.
+    """Fetches user record and guarantees a strictly UNIQUE Weaviate tenant shard per user.
+    Always syncs the unique tenant assignment directly into Firestore under users/{uid}.
     """
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    try:
-        from app.services.vector_store import get_weaviate_tenants
-        active_weaviate_tenants = get_weaviate_tenants()
-    except Exception:
-        active_weaviate_tenants = ["alpha", "beta", "tri"]
+    # Assign a unique, isolated tenant for this user
+    user_tenant = _assign_unique_tenant_for_user(uid, local_data)
 
-    user_tenant = None
-
-    # Check local store first
     if uid in local_data:
         record = local_data[uid]
-        user_tenant = record.get("tenant_id")
-        if not user_tenant or user_tenant not in active_weaviate_tenants:
-            user_tenant = _get_tenant_from_weaviate(local_data)
-            record["tenant_id"] = user_tenant
+        record["tenant_id"] = user_tenant
         if email and not record.get("email"):
             record["email"] = email
         record["last_login"] = now_iso
     else:
-        user_tenant = _get_tenant_from_weaviate(local_data)
         record = {
             "uid": uid,
             "user_uuid": uid,
@@ -90,43 +105,21 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
             "last_login": now_iso,
         }
 
-    # 1. Check or Sync to Firestore
+    # Always sync to Firestore so the user document is up to date and visible in console
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
             headers = {"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"}
-            resp = requests.get(url, headers=headers, timeout=5)
-
-            if resp.status_code == 200:
-                fields = resp.json().get("fields", {})
-                fs_tenant = fields.get("tenant_id", {}).get("stringValue", "").strip()
-                # If Firestore has a valid Weaviate tenant, keep it; otherwise update it with our Weaviate tenant
-                if fs_tenant and fs_tenant in active_weaviate_tenants:
-                    record["tenant_id"] = fs_tenant
-                else:
-                    # Update Firestore with real Weaviate tenant
-                    patch_payload = {
-                        "fields": {
-                            "email": {"stringValue": record.get("email", email)},
-                            "tenant_id": {"stringValue": record["tenant_id"]},
-                            "is_active": {"booleanValue": record.get("is_active", True)},
-                            "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
-                        }
-                    }
-                    requests.patch(url, headers=headers, json=patch_payload, timeout=3)
-            else:
-                # If document is not in Firestore (status 404 or other), create it directly in Firestore
-                patch_payload = {
-                    "fields": {
-                        "email": {"stringValue": record.get("email", email)},
-                        "tenant_id": {"stringValue": record["tenant_id"]},
-                        "is_active": {"booleanValue": record.get("is_active", True)},
-                        "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
-                    }
+            payload = {
+                "fields": {
+                    "email": {"stringValue": record.get("email", email)},
+                    "tenant_id": {"stringValue": user_tenant},
+                    "is_active": {"booleanValue": record.get("is_active", True)},
+                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
                 }
-                patch_resp = requests.patch(url, headers=headers, json=patch_payload, timeout=5)
-                print(f"[FirebaseDB] Created/Synced Firestore users/{uid} with tenant '{record['tenant_id']}' (status {patch_resp.status_code})")
-
+            }
+            resp = requests.patch(url, headers=headers, json=payload, timeout=5)
+            print(f"[FirebaseDB] Synced Firestore users/{uid} with unique tenant '{user_tenant}' (status {resp.status_code})")
         except Exception as e:
             print(f"[FirebaseDB] Firestore sync note: {e}")
 
@@ -153,11 +146,11 @@ def verify_tenant_access(user_record: dict | None, target_tenant: str, required_
     if not user_tenant:
         return (False, "Configuration Error: No tenant assigned to your account.")
 
-    # Single Tenant Isolation Check
+    # Strict 1-to-1 Tenant Isolation Check
     if target_tenant != user_tenant:
         return (
             False,
-            f"Tenant Authorisation Failed: You are only authorized to access tenant '{user_tenant}'.",
+            f"Tenant Authorisation Failed: You are only authorized to access tenant '{user_tenant}'. Cross-tenant access is strictly forbidden.",
         )
 
     raw_perms = user_record.get("permissions", [])
