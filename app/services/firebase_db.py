@@ -32,39 +32,19 @@ def _save_local_users(data: dict):
         json.dump(data, f, indent=2)
 
 
-def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
-    """Fetches user UUID, tenant ID, active status, and permissions from Firebase Database.
-    Ensures user account is registered with full validation.
+def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict | None:
+    """Fetches user UUID, tenant ID, active status, and permissions from Firebase Database (Firestore).
+    Requires the user to be manually registered in Firestore under users/{uid}.
     """
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # 1. Check local persistent store first
-    if uid in local_data:
-        record = local_data[uid]
-        updated = False
-        if email and record.get("email") != email:
-            record["email"] = email
-            updated = True
-        record["last_login"] = now_iso
-        if "is_active" not in record:
-            record["is_active"] = True
-            updated = True
-        if "user_uuid" not in record:
-            record["user_uuid"] = uid
-            updated = True
-        # Ensure permissions format
-        record["permissions"] = [p.upper() for p in record.get("permissions", DEFAULT_PERMISSIONS)]
-        _save_local_users(local_data)
-        return record
-
-    # 2. Try fetching from Firebase Firestore REST API
-    firestore_record = None
+    # 1. First, check Firebase Firestore REST API if id_token provided
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
             headers = {"Authorization": f"Bearer {id_token}"}
-            resp = requests.get(url, headers=headers, timeout=3)
+            resp = requests.get(url, headers=headers, timeout=5)
             if resp.status_code == 200:
                 fields = resp.json().get("fields", {})
                 tenant = fields.get("tenant_id", {}).get("stringValue", "alpha")
@@ -74,55 +54,36 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
                 firestore_record = {
                     "uid": uid,
                     "user_uuid": uid,
-                    "email": email,
+                    "email": fields.get("email", {}).get("stringValue", email),
                     "tenant_id": tenant if tenant in VALID_TENANTS else "alpha",
                     "is_active": is_active,
                     "permissions": perms,
-                    "created_at": now_iso,
                     "last_login": now_iso,
                 }
+                # Sync to local cache
+                local_data[uid] = firestore_record
+                _save_local_users(local_data)
+                return firestore_record
+            elif resp.status_code == 404:
+                # Explicitly not found in Firestore
+                pass
         except Exception as e:
             print(f"[FirebaseDB] Firestore lookup note: {e}")
 
-    if firestore_record:
-        local_data[uid] = firestore_record
+    # 2. Check local persistent store
+    if uid in local_data:
+        record = local_data[uid]
+        record["last_login"] = now_iso
+        if email and not record.get("email"):
+            record["email"] = email
+        if "user_uuid" not in record:
+            record["user_uuid"] = uid
+        record["permissions"] = [p.upper() for p in record.get("permissions", DEFAULT_PERMISSIONS)]
         _save_local_users(local_data)
-        return firestore_record
+        return record
 
-    # 3. New user registration: default to tenant 'alpha' with full permissions and active status
-    new_record = {
-        "uid": uid,
-        "user_uuid": uid,
-        "email": email,
-        "tenant_id": "alpha",
-        "is_active": True,
-        "permissions": DEFAULT_PERMISSIONS,
-        "created_at": now_iso,
-        "last_login": now_iso,
-    }
-    local_data[uid] = new_record
-    _save_local_users(local_data)
-
-    # Sync to Firestore if token present
-    if FIREBASE_PROJECT_ID and id_token:
-        try:
-            url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
-            payload = {
-                "fields": {
-                    "uid": {"stringValue": uid},
-                    "user_uuid": {"stringValue": uid},
-                    "email": {"stringValue": email or ""},
-                    "tenant_id": {"stringValue": new_record["tenant_id"]},
-                    "is_active": {"booleanValue": True},
-                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}},
-                    "created_at": {"stringValue": now_iso},
-                }
-            }
-            requests.patch(url, headers={"Authorization": f"Bearer {id_token}"}, json=payload, timeout=3)
-        except Exception:
-            pass
-
-    return new_record
+    # User is not registered in Firestore or local database
+    return None
 
 
 def update_user_tenant_and_permissions(
@@ -162,26 +123,36 @@ def update_user_tenant_and_permissions(
     return current
 
 
-def verify_tenant_access(user_record: dict, target_tenant: str, required_permission: str) -> tuple[bool, str]:
+def verify_tenant_access(user_record: dict | None, target_tenant: str, required_permission: str) -> tuple[bool, str]:
     """Enforces:
-    1. User account is active.
-    2. User belongs to requested tenant.
-    3. User possesses the required permission (READ, WRITE, UPDATE, DELETE, INGEST).
+    1. User ID is registered in Firebase Database.
+    2. User account is active.
+    3. User belongs to requested tenant.
+    4. User possesses the required permission.
     """
+    if not user_record:
+        return (
+            False,
+            "Access Denied: Your User ID has not been registered in the database. Please contact an administrator to assign you a tenant.",
+        )
+
     # 1. Active Account Check
     if not user_record.get("is_active", True):
         return (False, "Account Suspended: Your user account is inactive. Please contact your administrator.")
 
-    user_tenant = user_record.get("tenant_id", "alpha")
+    user_tenant = user_record.get("tenant_id")
+    if not user_tenant:
+        return (False, "Configuration Error: No tenant assigned to your account.")
+
     raw_perms = user_record.get("permissions", [])
     user_perms = [p.upper() for p in raw_perms]
     req_perm = required_permission.upper()
 
-    # 2. Strict Tenant Check
+    # 2. Strict Single Tenant Check
     if target_tenant != user_tenant:
         return (
             False,
-            f"Tenant Authorisation Failed: User belongs to tenant '{user_tenant}', but attempted an operation on tenant '{target_tenant}'. Cross-tenant access is strictly forbidden.",
+            f"Tenant Authorisation Failed: You are only authorized to access tenant '{user_tenant}'.",
         )
 
     # 3. Permission Check

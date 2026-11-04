@@ -165,9 +165,13 @@ export default function App() {
       if (res.ok && data.profile) {
         setUserProfile(data.profile);
         setSelectedTenant(data.profile.tenant_id || 'alpha');
-        if (data.available_tenants) setTenants(data.available_tenants);
+        setErrorMsg(null);
+      } else {
+        setErrorMsg(data.detail || 'Access Denied: Your User ID has not been registered in the database.');
       }
-    } catch {}
+    } catch {
+      setErrorMsg('Error connecting to backend server.');
+    }
   };
 
   useEffect(() => {
@@ -612,32 +616,24 @@ export default function App() {
               </span>
             </div>
 
-            {/* Tenant Selector */}
+            {/* Single Assigned Tenant Display (No other tenants shown) */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '11px', color: '#64748B', fontWeight: 600 }}>Active Tenant Shard</label>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '6px' }}>
-                {tenants.map((t) => {
-                  const isActive = selectedTenant === t.id;
-                  return (
-                    <button
-                      key={t.id}
-                      onClick={() => handleSelectTenant(t.id)}
-                      style={{
-                        padding: '6px 4px',
-                        borderRadius: '6px',
-                        fontSize: '11px',
-                        fontWeight: 600,
-                        cursor: 'pointer',
-                        border: isActive ? '1px solid #38BDF8' : '1px solid #334155',
-                        backgroundColor: isActive ? 'rgba(56, 189, 248, 0.15)' : '#1E293B',
-                        color: isActive ? '#38BDF8' : '#94A3B8',
-                        transition: 'all 0.15s ease',
-                      }}
-                    >
-                      {t.name.replace('Tenant ', '')}
-                    </button>
-                  );
-                })}
+              <label style={{ fontSize: '11px', color: '#64748B', fontWeight: 600 }}>Assigned Workspace Tenant</label>
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  backgroundColor: 'rgba(56, 189, 248, 0.12)',
+                  border: '1px solid rgba(56, 189, 248, 0.35)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}
+              >
+                <Building2 size={15} color="#38BDF8" />
+                <span style={{ fontSize: '12.5px', fontWeight: 700, color: '#38BDF8' }}>
+                  Tenant {selectedTenant.toUpperCase()}
+                </span>
               </div>
             </div>
 

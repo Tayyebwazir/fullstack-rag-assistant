@@ -73,11 +73,6 @@ MAX_FILE_SIZE = 25 * 1024 * 1024  # 25 MB
 class QuestionRequest(BaseModel):
     question: str = Field(min_length=1, max_length=4000)
     source_filter: str | None = Field(default=None, description="Optional document filter")
-    tenant_id: str | None = Field(default=None, description="Optional requested tenant")
-
-
-class SelectTenantRequest(BaseModel):
-    tenant_id: str
 
 
 class DocIdRequest(BaseModel):
@@ -100,29 +95,20 @@ def get_user_profile(user: dict = Depends(get_current_user)):
     email = user.get("email", "")
     id_token = user.get("id_token")
     profile = get_user_record(uid, email, id_token)
+    if not profile:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database. Please contact an administrator to assign you a tenant.",
+        )
+    if not profile.get("is_active", True):
+        raise HTTPException(
+            status_code=403,
+            detail="Account Inactive: Your account has been suspended.",
+        )
     return {
         "status": "success",
         "profile": profile,
-        "available_tenants": TENANT_METADATA,
-    }
-
-
-@app.post("/user/select-tenant")
-def select_tenant(req: SelectTenantRequest, user: dict = Depends(get_current_user)):
-    """Allows the user to select/switch their active tenant in Firebase Database."""
-    if req.tenant_id not in VALID_TENANTS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid tenant '{req.tenant_id}'. Must be one of {VALID_TENANTS}",
-        )
-
-    uid = user.get("uid")
-    id_token = user.get("id_token")
-    updated = update_user_tenant_and_permissions(uid=uid, tenant_id=req.tenant_id, id_token=id_token)
-    return {
-        "status": "success",
-        "message": f"Switched active tenant to '{req.tenant_id}'",
-        "profile": updated,
+        "assigned_tenant": profile.get("tenant_id", "alpha"),
     }
 
 
@@ -135,6 +121,11 @@ def list_documents(user: dict = Depends(get_current_user)):
     """Lists only the documents belonging to the authenticated user's authorized tenant."""
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Verify READ permission on authorized tenant
@@ -155,11 +146,16 @@ async def upload_document(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user),
 ):
-    """Uploads a new PDF, DOCX, or DOC file for the authenticated user's authorized tenant.
-    Never trusts client tenant parameter; resolves authorized tenant on the backend.
+    """Uploads a new PDF, DOCX, or DOC file for the authenticated user's single authorized tenant.
+    Resolves authorized tenant strictly on the backend from Firebase Database.
     """
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Verify WRITE permission
@@ -223,6 +219,11 @@ def ingest_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
     """Chunks, embeds, and ingests an uploaded document into the authorized tenant's Weaviate shard."""
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Verify INGEST permission
@@ -302,6 +303,11 @@ async def update_document(
     """
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Verify UPDATE permission
@@ -334,7 +340,6 @@ async def update_document(
     if file_size > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="File size exceeds the 25MB limit.")
 
-    # Save new version to a staged path first to protect the existing document
     new_version = doc.get("version", 1) + 1
     safe_filename = Path(file.filename).name.replace(" ", "_")
     tenant_upload_dir = BASE_DIR / "app" / "data" / "tenants" / authorized_tenant
@@ -362,7 +367,6 @@ async def update_document(
             doc_id=doc_id,
         )
 
-        # Remove old file if it existed and is different from staged
         old_path = Path(doc.get("file_path", ""))
         if old_path.exists() and old_path != staged_path:
             try:
@@ -393,7 +397,6 @@ async def update_document(
             "document": updated_doc,
         }
     except Exception as exc:
-        # Cleanup staged file if processing failed, keeping original document intact
         if staged_path.exists():
             try:
                 staged_path.unlink()
@@ -407,11 +410,14 @@ async def update_document(
 
 @app.delete("/documents/delete")
 def delete_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
-    """Permanently deletes a document belonging to the authenticated tenant,
-    removing its stored file, metadata record, and all vector chunks from Weaviate.
-    """
+    """Permanently deletes a document belonging to the authenticated tenant."""
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Verify DELETE permission
@@ -460,6 +466,11 @@ def delete_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
 def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user)):
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        raise HTTPException(
+            status_code=403,
+            detail="Access Denied: Your User ID has not been registered in the database.",
+        )
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Enforce READ permission
@@ -481,6 +492,12 @@ def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user
 def ask_question_stream(request: QuestionRequest, user: dict = Depends(get_current_user)):
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
+    if not user_record:
+        def unauth_stream():
+            payload = json.dumps({"type": "error", "error": "403 Forbidden: User ID not registered in database."})
+            yield f"data: {payload}\n\n"
+        return StreamingResponse(unauth_stream(), media_type="text/event-stream")
+
     authorized_tenant = user_record.get("tenant_id", "alpha")
 
     # Enforce READ permission
