@@ -44,22 +44,17 @@ def _get_tenant_from_weaviate(local_data: dict) -> str:
     if not weaviate_tenants:
         weaviate_tenants = ["alpha", "beta", "tri"]
 
-    weaviate_tenants.sort()
+    # Prefer 'alpha' if available so user has immediate access to existing documents
+    if "alpha" in weaviate_tenants:
+        return "alpha"
 
-    # Distribute users evenly across authentic Weaviate tenants
-    counts = {t: 0 for t in weaviate_tenants}
-    for u in local_data.values():
-        t = u.get("tenant_id")
-        if t in counts:
-            counts[t] += 1
-
-    assigned_tenant = min(counts, key=counts.get)
-    return assigned_tenant
+    return weaviate_tenants[0]
 
 
 def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
     """Fetches user record from Firebase Firestore.
     Assigns tenant_id directly from Weaviate DB (not email) and stores it in Firestore.
+    Always guarantees the user document is persisted in Firestore under users/{uid}.
     """
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -70,107 +65,75 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
     except Exception:
         active_weaviate_tenants = ["alpha", "beta", "tri"]
 
-    # 1. Query Firestore REST API if id_token provided
+    user_tenant = None
+
+    # Check local store first
+    if uid in local_data:
+        record = local_data[uid]
+        user_tenant = record.get("tenant_id")
+        if not user_tenant or user_tenant not in active_weaviate_tenants:
+            user_tenant = _get_tenant_from_weaviate(local_data)
+            record["tenant_id"] = user_tenant
+        if email and not record.get("email"):
+            record["email"] = email
+        record["last_login"] = now_iso
+    else:
+        user_tenant = _get_tenant_from_weaviate(local_data)
+        record = {
+            "uid": uid,
+            "user_uuid": uid,
+            "email": email,
+            "tenant_id": user_tenant,
+            "is_active": True,
+            "permissions": DEFAULT_PERMISSIONS,
+            "created_at": now_iso,
+            "last_login": now_iso,
+        }
+
+    # 1. Check or Sync to Firestore
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
-            headers = {"Authorization": f"Bearer {id_token}"}
+            headers = {"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"}
             resp = requests.get(url, headers=headers, timeout=5)
 
             if resp.status_code == 200:
                 fields = resp.json().get("fields", {})
-                tenant = fields.get("tenant_id", {}).get("stringValue", "").strip()
-
-                # If tenant in Firestore is missing or was mistakenly created from email, fix it using Weaviate DB
-                if not tenant or tenant not in active_weaviate_tenants:
-                    tenant = _get_tenant_from_weaviate(local_data)
-                    # Update Firestore with the real Weaviate tenant
-                    try:
-                        patch_payload = {
-                            "fields": {
-                                "email": {"stringValue": fields.get("email", {}).get("stringValue", email)},
-                                "tenant_id": {"stringValue": tenant},
-                                "is_active": fields.get("is_active", {"booleanValue": True}),
-                                "permissions": fields.get("permissions", {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}}),
-                            }
+                fs_tenant = fields.get("tenant_id", {}).get("stringValue", "").strip()
+                # If Firestore has a valid Weaviate tenant, keep it; otherwise update it with our Weaviate tenant
+                if fs_tenant and fs_tenant in active_weaviate_tenants:
+                    record["tenant_id"] = fs_tenant
+                else:
+                    # Update Firestore with real Weaviate tenant
+                    patch_payload = {
+                        "fields": {
+                            "email": {"stringValue": record.get("email", email)},
+                            "tenant_id": {"stringValue": record["tenant_id"]},
+                            "is_active": {"booleanValue": record.get("is_active", True)},
+                            "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
                         }
-                        requests.patch(url, headers=headers, json=patch_payload, timeout=3)
-                        print(f"[FirebaseDB] Updated Firestore user '{uid}' with Weaviate tenant: '{tenant}'")
-                    except Exception as pe:
-                        print(f"[FirebaseDB] Patch note: {pe}")
-
-                is_active = fields.get("is_active", {}).get("booleanValue", True)
-                perms_array = fields.get("permissions", {}).get("arrayValue", {}).get("values", [])
-                perms = [p.get("stringValue").upper() for p in perms_array if p.get("stringValue")] or DEFAULT_PERMISSIONS
-                user_email = fields.get("email", {}).get("stringValue", email)
-
-                firestore_record = {
-                    "uid": uid,
-                    "user_uuid": uid,
-                    "email": user_email,
-                    "tenant_id": tenant,
-                    "is_active": is_active,
-                    "permissions": perms,
-                    "last_login": now_iso,
+                    }
+                    requests.patch(url, headers=headers, json=patch_payload, timeout=3)
+            else:
+                # If document is not in Firestore (status 404 or other), create it directly in Firestore
+                patch_payload = {
+                    "fields": {
+                        "email": {"stringValue": record.get("email", email)},
+                        "tenant_id": {"stringValue": record["tenant_id"]},
+                        "is_active": {"booleanValue": record.get("is_active", True)},
+                        "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
+                    }
                 }
-                local_data[uid] = firestore_record
-                _save_local_users(local_data)
-                return firestore_record
+                patch_resp = requests.patch(url, headers=headers, json=patch_payload, timeout=5)
+                print(f"[FirebaseDB] Created/Synced Firestore users/{uid} with tenant '{record['tenant_id']}' (status {patch_resp.status_code})")
 
         except Exception as e:
-            print(f"[FirebaseDB] Firestore lookup note: {e}")
-
-    # 2. Check local store if user was already created
-    if uid in local_data:
-        record = local_data[uid]
-        record["last_login"] = now_iso
-        if email and not record.get("email"):
-            record["email"] = email
-        if not record.get("tenant_id") or record.get("tenant_id") not in active_weaviate_tenants:
-            record["tenant_id"] = _get_tenant_from_weaviate(local_data)
-        _save_local_users(local_data)
-        return record
-
-    # 3. AUTOMATIC CREATION: User logs in for the first time
-    # Tenant is fetched directly from Weaviate DB
-    weaviate_tenant = _get_tenant_from_weaviate(local_data)
-    new_record = {
-        "uid": uid,
-        "user_uuid": uid,
-        "email": email,
-        "tenant_id": weaviate_tenant,
-        "is_active": True,
-        "permissions": DEFAULT_PERMISSIONS,
-        "created_at": now_iso,
-        "last_login": now_iso,
-    }
-
-    # Automatically persist to Firebase Firestore
-    if FIREBASE_PROJECT_ID and id_token:
-        try:
-            url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
-            payload = {
-                "fields": {
-                    "email": {"stringValue": email or ""},
-                    "tenant_id": {"stringValue": weaviate_tenant},
-                    "is_active": {"booleanValue": True},
-                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}},
-                }
-            }
-            resp = requests.patch(
-                url,
-                headers={"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"},
-                json=payload,
-                timeout=5,
-            )
-            print(f"[FirebaseDB] Created user '{uid}' in Firestore with Weaviate tenant '{weaviate_tenant}' (status {resp.status_code})")
-        except Exception as err:
-            print(f"[FirebaseDB] Auto-create Firestore note: {err}")
+            print(f"[FirebaseDB] Firestore sync note: {e}")
 
     # Save to local cache
-    local_data[uid] = new_record
+    local_data[uid] = record
     _save_local_users(local_data)
-    return new_record
+    return record
 
 
 def verify_tenant_access(user_record: dict | None, target_tenant: str, required_permission: str) -> tuple[bool, str]:
