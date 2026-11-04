@@ -51,6 +51,20 @@ def ensure_collection(client):
     return collection
 
 
+def get_weaviate_tenants() -> list[str]:
+    """Retrieves all active tenant shards directly from Weaviate DB."""
+    try:
+        with connect_weaviate() as client:
+            if not client.collections.exists(COLLECTION_NAME):
+                return ["alpha", "beta", "tri"]
+            col = client.collections.get(COLLECTION_NAME)
+            tenants = list(col.tenants.get().keys())
+            return tenants if tenants else ["alpha", "beta", "tri"]
+    except Exception as e:
+        print(f"[Weaviate] Error fetching tenants: {e}")
+        return ["alpha", "beta", "tri"]
+
+
 def ensure_tenant(collection, tenant_id: str) -> str:
     """Dynamically creates the tenant shard in Weaviate if it does not already exist."""
     target = tenant_id.strip() if tenant_id and tenant_id.strip() else "default"

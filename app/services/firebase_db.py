@@ -1,5 +1,4 @@
 import json
-import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,26 +31,46 @@ def _save_local_users(data: dict):
         json.dump(data, f, indent=2)
 
 
-def _generate_dynamic_tenant_id(email: str, uid: str) -> str:
-    """Generates a clean dynamic tenant identifier from email or UID."""
-    if email and "@" in email:
-        username = email.split("@")[0]
-        clean = re.sub(r"[^a-zA-Z0-9_]", "_", username).strip("_").lower()
-        if clean:
-            return clean
-    return f"tenant_{uid[:8].lower()}"
+def _get_tenant_from_weaviate(local_data: dict) -> str:
+    """Retrieves existing tenant shards directly from Weaviate DB and assigns an authentic tenant.
+    Never uses email to generate tenant names.
+    """
+    try:
+        from app.services.vector_store import get_weaviate_tenants
+        weaviate_tenants = get_weaviate_tenants()
+    except Exception:
+        weaviate_tenants = []
+
+    if not weaviate_tenants:
+        weaviate_tenants = ["alpha", "beta", "tri"]
+
+    weaviate_tenants.sort()
+
+    # Distribute users evenly across authentic Weaviate tenants
+    counts = {t: 0 for t in weaviate_tenants}
+    for u in local_data.values():
+        t = u.get("tenant_id")
+        if t in counts:
+            counts[t] += 1
+
+    assigned_tenant = min(counts, key=counts.get)
+    return assigned_tenant
 
 
 def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
     """Fetches user record from Firebase Firestore.
-    If the user does not exist in Firestore yet, AUTOMATICALLY creates their record
-    with their UID, email, and dynamic tenant_id without manual entry.
+    Assigns tenant_id directly from Weaviate DB (not email) and stores it in Firestore.
     """
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
 
+    try:
+        from app.services.vector_store import get_weaviate_tenants
+        active_weaviate_tenants = get_weaviate_tenants()
+    except Exception:
+        active_weaviate_tenants = ["alpha", "beta", "tri"]
+
     # 1. Query Firestore REST API if id_token provided
-    firestore_found = False
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
@@ -61,8 +80,25 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
             if resp.status_code == 200:
                 fields = resp.json().get("fields", {})
                 tenant = fields.get("tenant_id", {}).get("stringValue", "").strip()
-                if not tenant:
-                    tenant = _generate_dynamic_tenant_id(email, uid)
+
+                # If tenant in Firestore is missing or was mistakenly created from email, fix it using Weaviate DB
+                if not tenant or tenant not in active_weaviate_tenants:
+                    tenant = _get_tenant_from_weaviate(local_data)
+                    # Update Firestore with the real Weaviate tenant
+                    try:
+                        patch_payload = {
+                            "fields": {
+                                "email": {"stringValue": fields.get("email", {}).get("stringValue", email)},
+                                "tenant_id": {"stringValue": tenant},
+                                "is_active": fields.get("is_active", {"booleanValue": True}),
+                                "permissions": fields.get("permissions", {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}}),
+                            }
+                        }
+                        requests.patch(url, headers=headers, json=patch_payload, timeout=3)
+                        print(f"[FirebaseDB] Updated Firestore user '{uid}' with Weaviate tenant: '{tenant}'")
+                    except Exception as pe:
+                        print(f"[FirebaseDB] Patch note: {pe}")
+
                 is_active = fields.get("is_active", {}).get("booleanValue", True)
                 perms_array = fields.get("permissions", {}).get("arrayValue", {}).get("values", [])
                 perms = [p.get("stringValue").upper() for p in perms_array if p.get("stringValue")] or DEFAULT_PERMISSIONS
@@ -81,10 +117,6 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
                 _save_local_users(local_data)
                 return firestore_record
 
-            elif resp.status_code == 404:
-                # Document does not exist yet -> We will automatically create it below
-                firestore_found = False
-
         except Exception as e:
             print(f"[FirebaseDB] Firestore lookup note: {e}")
 
@@ -94,18 +126,19 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
         record["last_login"] = now_iso
         if email and not record.get("email"):
             record["email"] = email
-        if not record.get("tenant_id"):
-            record["tenant_id"] = _generate_dynamic_tenant_id(email, uid)
+        if not record.get("tenant_id") or record.get("tenant_id") not in active_weaviate_tenants:
+            record["tenant_id"] = _get_tenant_from_weaviate(local_data)
         _save_local_users(local_data)
         return record
 
     # 3. AUTOMATIC CREATION: User logs in for the first time
-    dynamic_tenant = _generate_dynamic_tenant_id(email, uid)
+    # Tenant is fetched directly from Weaviate DB
+    weaviate_tenant = _get_tenant_from_weaviate(local_data)
     new_record = {
         "uid": uid,
         "user_uuid": uid,
         "email": email,
-        "tenant_id": dynamic_tenant,
+        "tenant_id": weaviate_tenant,
         "is_active": True,
         "permissions": DEFAULT_PERMISSIONS,
         "created_at": now_iso,
@@ -119,7 +152,7 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
             payload = {
                 "fields": {
                     "email": {"stringValue": email or ""},
-                    "tenant_id": {"stringValue": dynamic_tenant},
+                    "tenant_id": {"stringValue": weaviate_tenant},
                     "is_active": {"booleanValue": True},
                     "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in DEFAULT_PERMISSIONS]}},
                 }
@@ -130,7 +163,7 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
                 json=payload,
                 timeout=5,
             )
-            print(f"[FirebaseDB] Automatically created user '{uid}' in Firestore with tenant '{dynamic_tenant}' (status {resp.status_code})")
+            print(f"[FirebaseDB] Created user '{uid}' in Firestore with Weaviate tenant '{weaviate_tenant}' (status {resp.status_code})")
         except Exception as err:
             print(f"[FirebaseDB] Auto-create Firestore note: {err}")
 
@@ -204,7 +237,6 @@ def get_tenant_documents(tenant_id: str) -> list[dict]:
         d for d in docs.values()
         if d.get("tenant_id") == tenant_id
     ]
-    # Sort by upload timestamp descending (newest first)
     tenant_docs.sort(key=lambda x: x.get("upload_timestamp", ""), reverse=True)
     return tenant_docs
 
@@ -223,7 +255,6 @@ def create_document_record(doc_data: dict, id_token: str | None = None) -> dict:
     docs[doc_id] = doc_data
     _save_local_documents(docs)
 
-    # Sync to Firestore if token available
     if FIREBASE_PROJECT_ID and id_token:
         try:
             tenant_id = doc_data.get("tenant_id", "default")
@@ -254,7 +285,6 @@ def update_document_record(doc_id: str, updates: dict, id_token: str | None = No
     docs[doc_id].update(updates)
     _save_local_documents(docs)
 
-    # Sync to Firestore if token available
     if FIREBASE_PROJECT_ID and id_token:
         try:
             tenant_id = docs[doc_id].get("tenant_id", "default")
@@ -283,7 +313,6 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
         del docs[doc_id]
         _save_local_documents(docs)
 
-        # Sync deletion to Firestore
         if FIREBASE_PROJECT_ID and id_token:
             try:
                 url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
