@@ -3,12 +3,42 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 import requests
+import firebase_admin
+from firebase_admin import credentials, firestore
 from app.config import FIREBASE_PROJECT_ID, BASE_DIR
 
 USERS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_users.json"
 DOCUMENTS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_documents.json"
+CREDENTIALS_FILE = BASE_DIR / "app" / "data" / "firebase_credentials.json"
+FALLBACK_CREDENTIALS_FILE = Path(r"D:\DB_config\authen-81a29-firebase-adminsdk-fbsvc-457a3fc98f.json")
 
 DEFAULT_PERMISSIONS = ["READ", "WRITE", "UPDATE", "DELETE", "INGEST"]
+
+_firestore_client = None
+
+def _get_firestore_client():
+    global _firestore_client
+    if _firestore_client is not None:
+        return _firestore_client
+
+    try:
+        if not firebase_admin._apps:
+            cred_file = None
+            if CREDENTIALS_FILE.exists():
+                cred_file = CREDENTIALS_FILE
+            elif FALLBACK_CREDENTIALS_FILE.exists():
+                cred_file = FALLBACK_CREDENTIALS_FILE
+
+            if cred_file:
+                cred = credentials.Certificate(str(cred_file))
+                firebase_admin.initialize_app(cred)
+            else:
+                firebase_admin.initialize_app()
+        _firestore_client = firestore.client()
+        return _firestore_client
+    except Exception as e:
+        print(f"[FirebaseAdmin] Firestore client init note: {e}")
+        return None
 
 
 # ==========================================
@@ -31,46 +61,67 @@ def _save_local_users(data: dict):
         json.dump(data, f, indent=2)
 
 
-def _assign_unique_tenant_for_user(uid: str, local_data: dict) -> str:
+def _is_valid_weaviate_tenant(tenant: str | None, active_tenants: list[str]) -> bool:
+    if not tenant or not isinstance(tenant, str):
+        return False
+    t = tenant.strip().lower()
+    # Reject legacy strings and prefix templates
+    if t in ("alpha", "beta", "tri", "default") or t.startswith("tenant_"):
+        return False
+    return tenant.strip() in active_tenants
+
+
+def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant: str = "") -> str:
     """Assigns a strictly UNIQUE tenant shard for each user directly from Weaviate DB.
     Guarantees no two users share the same tenant.
+    Always uses real Weaviate UUID tenant IDs.
     """
     try:
-        from app.services.vector_store import get_weaviate_tenants, connect_weaviate, COLLECTION_NAME
-        from weaviate.classes.tenants import Tenant
+        from app.services.vector_store import get_weaviate_tenants, create_weaviate_tenant
         weaviate_tenants = get_weaviate_tenants()
-    except Exception:
+    except Exception as e:
+        print(f"[Weaviate] Error getting tenants: {e}")
         weaviate_tenants = []
 
-    if not weaviate_tenants:
-        weaviate_tenants = ["alpha", "beta", "tri"]
-
-    # Collect all tenants currently assigned to OTHER users
+    # Collect all tenants currently claimed by OTHER users in local store
     other_assigned_tenants = {
         user_info.get("tenant_id") for other_uid, user_info in local_data.items()
-        if other_uid != uid and user_info.get("tenant_id")
+        if other_uid != uid and _is_valid_weaviate_tenant(user_info.get("tenant_id"), weaviate_tenants)
     }
 
-    # If this user already has an assigned tenant that no one else has, keep it
-    current_user_tenant = local_data.get(uid, {}).get("tenant_id")
-    if current_user_tenant and current_user_tenant not in other_assigned_tenants:
-        return current_user_tenant
+    # Also collect tenants currently claimed by other users in Firestore
+    try:
+        db = _get_firestore_client()
+        if db:
+            for doc in db.collection("users").stream():
+                if doc.id != uid:
+                    t = (doc.to_dict() or {}).get("tenant_id")
+                    if _is_valid_weaviate_tenant(t, weaviate_tenants):
+                        other_assigned_tenants.add(t)
+    except Exception:
+        pass
 
-    # Find a Weaviate tenant shard not taken by any other user
-    available = [t for t in weaviate_tenants if t not in other_assigned_tenants]
+    # If this user already has a valid tenant from Weaviate that is not claimed by anyone else, keep it
+    candidate = current_fs_tenant or local_data.get(uid, {}).get("tenant_id")
+    if _is_valid_weaviate_tenant(candidate, weaviate_tenants) and candidate not in other_assigned_tenants:
+        return candidate.strip()
+
+    # Look for an available, unassigned tenant in Weaviate (e.g., db261c85-2d6f-4a93-8aeb-1f725a5e30cc)
+    available = [
+        t for t in weaviate_tenants
+        if t not in other_assigned_tenants and _is_valid_weaviate_tenant(t, weaviate_tenants)
+    ]
 
     if available:
         available.sort()
         return available[0]
 
-    # If all existing Weaviate shards are assigned, dynamically create a new tenant shard in Weaviate!
-    new_tenant = f"tenant_{uid[:8].lower()}"
+    # If all existing Weaviate tenants are taken (or no tenant exists), dynamically create a new UUID tenant in Weaviate!
+    new_tenant = str(uuid.uuid4())
     try:
-        with connect_weaviate() as client:
-            if client.collections.exists(COLLECTION_NAME):
-                col = client.collections.get(COLLECTION_NAME)
-                col.tenants.create([Tenant(name=new_tenant)])
-                print(f"[Weaviate] Dynamically provisioned dedicated tenant shard: '{new_tenant}'")
+        from app.services.vector_store import create_weaviate_tenant
+        create_weaviate_tenant(new_tenant)
+        print(f"[Weaviate] Dynamically provisioned new UUID tenant shard: '{new_tenant}'")
     except Exception as e:
         print(f"[Weaviate] Note provisioning shard {new_tenant}: {e}")
 
@@ -84,44 +135,70 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
     local_data = _load_local_users()
     now_iso = datetime.now(timezone.utc).isoformat()
 
-    # Assign a unique, isolated tenant for this user
-    user_tenant = _assign_unique_tenant_for_user(uid, local_data)
+    # Check existing Firestore document first if available
+    fs_tenant = ""
+    fs_email = ""
+    fs_record = {}
+    try:
+        db = _get_firestore_client()
+        if db:
+            doc_snap = db.collection("users").document(uid).get()
+            if doc_snap.exists:
+                fs_record = doc_snap.to_dict() or {}
+                fs_tenant = fs_record.get("tenant_id", "")
+                fs_email = fs_record.get("email", "")
+    except Exception as e:
+        print(f"[FirebaseDB] Firestore read note: {e}")
 
-    if uid in local_data:
-        record = local_data[uid]
-        record["tenant_id"] = user_tenant
-        if email and not record.get("email"):
-            record["email"] = email
-        record["last_login"] = now_iso
-    else:
-        record = {
-            "uid": uid,
-            "user_uuid": uid,
-            "email": email,
-            "tenant_id": user_tenant,
-            "is_active": True,
-            "permissions": DEFAULT_PERMISSIONS,
-            "created_at": now_iso,
-            "last_login": now_iso,
-        }
+    # Assign a unique, isolated tenant for this user directly from Weaviate
+    user_tenant = _assign_unique_tenant_for_user(uid, local_data, fs_tenant)
 
-    # Always sync to Firestore so the user document is up to date and visible in console
+    effective_email = email or fs_email or local_data.get(uid, {}).get("email", "")
+
+    record = {
+        "uid": uid,
+        "user_uuid": uid,
+        "email": effective_email,
+        "tenant_id": user_tenant,
+        "is_active": fs_record.get("is_active", local_data.get(uid, {}).get("is_active", True)),
+        "permissions": fs_record.get("permissions", local_data.get(uid, {}).get("permissions", DEFAULT_PERMISSIONS)),
+        "created_at": fs_record.get("created_at", local_data.get(uid, {}).get("created_at", now_iso)),
+        "last_login": now_iso,
+    }
+
+    # 1. Direct sync into Firestore via Admin SDK
+    try:
+        db = _get_firestore_client()
+        if db:
+            db.collection("users").document(uid).set({
+                "email": record["email"],
+                "tenant_id": user_tenant,
+                "is_active": record["is_active"],
+                "permissions": record["permissions"],
+                "created_at": record["created_at"],
+                "last_login": record["last_login"],
+            }, merge=True)
+            print(f"[FirebaseDB Admin] Synced Firestore users/{uid} with tenant_id '{user_tenant}'")
+    except Exception as e:
+        print(f"[FirebaseDB Admin] Sync error: {e}")
+
+    # 2. Sync via REST API as extra guarantee if id_token provided
     if FIREBASE_PROJECT_ID and id_token:
         try:
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/users/{uid}"
             headers = {"Authorization": f"Bearer {id_token}", "Content-Type": "application/json"}
             payload = {
                 "fields": {
-                    "email": {"stringValue": record.get("email", email)},
+                    "email": {"stringValue": record["email"]},
                     "tenant_id": {"stringValue": user_tenant},
-                    "is_active": {"booleanValue": record.get("is_active", True)},
-                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record.get("permissions", DEFAULT_PERMISSIONS)]}},
+                    "is_active": {"booleanValue": record["is_active"]},
+                    "permissions": {"arrayValue": {"values": [{"stringValue": p} for p in record["permissions"]]}},
                 }
             }
             resp = requests.patch(url, headers=headers, json=payload, timeout=5)
-            print(f"[FirebaseDB] Synced Firestore users/{uid} with unique tenant '{user_tenant}' (status {resp.status_code})")
+            print(f"[FirebaseDB REST] Synced Firestore users/{uid} with unique tenant '{user_tenant}' (status {resp.status_code})")
         except Exception as e:
-            print(f"[FirebaseDB] Firestore sync note: {e}")
+            print(f"[FirebaseDB REST] Sync note: {e}")
 
     # Save to local cache
     local_data[uid] = record
@@ -208,12 +285,21 @@ def create_document_record(doc_data: dict, id_token: str | None = None) -> dict:
     docs = _load_local_documents()
     doc_id = doc_data.get("doc_id") or str(uuid.uuid4())
     doc_data["doc_id"] = doc_id
+    tenant_id = doc_data.get("tenant_id", "default")
     docs[doc_id] = doc_data
     _save_local_documents(docs)
 
+    # 1. Direct Firestore Admin SDK sync
+    try:
+        db = _get_firestore_client()
+        if db:
+            db.collection(f"tenants_{tenant_id}_docs").document(doc_id).set(doc_data)
+    except Exception as e:
+        print(f"[FirebaseDB Admin] Doc create sync note: {e}")
+
+    # 2. REST API fallback
     if FIREBASE_PROJECT_ID and id_token:
         try:
-            tenant_id = doc_data.get("tenant_id", "default")
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
             fields = {
                 "doc_id": {"stringValue": doc_id},
@@ -239,11 +325,20 @@ def update_document_record(doc_id: str, updates: dict, id_token: str | None = No
         return None
 
     docs[doc_id].update(updates)
+    tenant_id = docs[doc_id].get("tenant_id", "default")
     _save_local_documents(docs)
 
+    # 1. Direct Firestore Admin SDK sync
+    try:
+        db = _get_firestore_client()
+        if db:
+            db.collection(f"tenants_{tenant_id}_docs").document(doc_id).set(updates, merge=True)
+    except Exception as e:
+        print(f"[FirebaseDB Admin] Doc update sync note: {e}")
+
+    # 2. REST API fallback
     if FIREBASE_PROJECT_ID and id_token:
         try:
-            tenant_id = docs[doc_id].get("tenant_id", "default")
             url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
             fields = {}
             for k, v in updates.items():
@@ -269,6 +364,15 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
         del docs[doc_id]
         _save_local_documents(docs)
 
+        # 1. Direct Firestore Admin SDK sync
+        try:
+            db = _get_firestore_client()
+            if db:
+                db.collection(f"tenants_{tenant_id}_docs").document(doc_id).delete()
+        except Exception as e:
+            print(f"[FirebaseDB Admin] Doc delete sync note: {e}")
+
+        # 2. REST API fallback
         if FIREBASE_PROJECT_ID and id_token:
             try:
                 url = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"

@@ -52,22 +52,34 @@ def ensure_collection(client):
 
 
 def get_weaviate_tenants() -> list[str]:
-    """Retrieves all active tenant shards directly from Weaviate DB."""
+    """Retrieves all active tenant shards directly from Weaviate DB without any hardcoded fallbacks."""
     try:
         with connect_weaviate() as client:
             if not client.collections.exists(COLLECTION_NAME):
-                return ["alpha", "beta", "tri"]
+                return []
             col = client.collections.get(COLLECTION_NAME)
             tenants = list(col.tenants.get().keys())
-            return tenants if tenants else ["alpha", "beta", "tri"]
+            return tenants
     except Exception as e:
         print(f"[Weaviate] Error fetching tenants: {e}")
-        return ["alpha", "beta", "tri"]
+        return []
+
+
+def create_weaviate_tenant(tenant_id: str | None = None) -> str:
+    """Creates a new tenant shard in Weaviate using a UUIDv4 (matching weaviate_connection.py)."""
+    target = tenant_id.strip() if tenant_id and tenant_id.strip() else str(uuid.uuid4())
+    with connect_weaviate() as client:
+        collection = ensure_collection(client)
+        existing = list(collection.tenants.get().keys())
+        if target not in existing:
+            collection.tenants.create([Tenant(name=target)])
+            print(f"[Weaviate] Dynamically provisioned dedicated UUID tenant shard: '{target}'")
+    return target
 
 
 def ensure_tenant(collection, tenant_id: str) -> str:
     """Dynamically creates the tenant shard in Weaviate if it does not already exist."""
-    target = tenant_id.strip() if tenant_id and tenant_id.strip() else "default"
+    target = tenant_id.strip() if tenant_id and tenant_id.strip() else str(uuid.uuid4())
     existing = list(collection.tenants.get().keys())
     if target not in existing:
         try:
