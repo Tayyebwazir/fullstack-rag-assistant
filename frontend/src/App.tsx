@@ -258,7 +258,7 @@ export default function App() {
 
     try {
       const token = await currentUser.getIdToken();
-      const res = await fetch(`${API_BASE}/question/ask`, {
+      const res = await fetch(`${API_BASE}/ask`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
@@ -272,16 +272,17 @@ export default function App() {
 
       const data = await res.json();
       if (res.ok) {
+        const retrievedSources = data.sources || data.retrieved_chunks || [];
         const aiMsg: ChatMessage = {
           id: String(Date.now() + 1),
           sender: 'ai',
           text: data.answer || 'No response generated.',
-          sources: data.retrieved_chunks || [],
+          sources: retrievedSources,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, aiMsg]);
-        if (data.retrieved_chunks && data.retrieved_chunks.length > 0) {
-          setActiveSelectedChunk(data.retrieved_chunks[0]);
+        if (retrievedSources.length > 0) {
+          setActiveSelectedChunk(retrievedSources[0]);
         }
       } else {
         const errorMsgText: ChatMessage = {

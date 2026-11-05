@@ -460,6 +460,7 @@ def delete_document(req: DocIdRequest, user: dict = Depends(get_current_user)):
 # ==========================================
 
 @app.post("/ask")
+@app.post("/question/ask")
 def ask_question(request: QuestionRequest, user: dict = Depends(get_current_user)):
     uid = user.get("uid")
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
