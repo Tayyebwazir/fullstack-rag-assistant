@@ -2,33 +2,33 @@ import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { auth, onAuthStateChanged, signOut, User } from './firebase';
-import { AuthModal } from './components/AuthModal';
 import { AuthPage } from './components/AuthPage';
 import {
+  GraduationCap,
+  MessageSquare,
   FileText,
-  Database,
+  UploadCloud,
   Send,
   Zap,
-  CheckCircle,
-  AlertCircle,
+  CheckCircle2,
   Copy,
   Check,
   RefreshCw,
-  Layers,
-  Sparkles,
-  Award,
-  Hash,
-  BookOpen,
-  LogOut,
-  User as UserIcon,
-  Building2,
-  UploadCloud,
+  Plus,
   Trash2,
   ShieldCheck,
-  ChevronDown,
-  X,
-  FileUp,
-  SlidersHorizontal,
+  HelpCircle,
+  FileCheck,
+  Sparkles,
+  BookOpen,
+  Image as ImageIcon,
+  Paperclip,
+  CheckCircle,
+  Clock,
+  Layers,
+  ChevronRight,
+  ExternalLink,
+  Lock,
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -40,18 +40,6 @@ interface Chunk {
   chunk_index: number;
   doc_id?: string;
   tenant?: string;
-}
-
-interface RerankedChunk extends Chunk {
-  original_rank?: number;
-  relevance_score?: number;
-  rerank_position?: number;
-}
-
-interface TenantMetadata {
-  id: string;
-  name: string;
-  description: string;
 }
 
 interface UserProfile {
@@ -78,50 +66,42 @@ interface TenantDocument {
   error_message?: string;
 }
 
+interface ChatMessage {
+  id: string;
+  sender: 'student' | 'ai';
+  text: string;
+  sources?: Chunk[];
+  timestamp: string;
+}
+
 export default function App() {
-  const [question, setQuestion] = useState('');
-  const [streamedAnswer, setStreamedAnswer] = useState('');
-  const [isStreaming, setIsStreaming] = useState(false);
-  const [tokenCount, setTokenCount] = useState(0);
-  const [streamStartTime, setStreamStartTime] = useState<number | null>(null);
-  const [elapsedTime, setElapsedTime] = useState<number>(0);
-
-  const [retrievedChunks, setRetrievedChunks] = useState<Chunk[]>([]);
-  const [rerankedChunks, setRerankedChunks] = useState<RerankedChunk[]>([]);
-
-  const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-
-  // Dynamic Multi-Tenancy & Authorization States
-  const [selectedTenant, setSelectedTenant] = useState<string>('');
-  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-
-  // Tenant Documents
-  const [documents, setDocuments] = useState<TenantDocument[]>([]);
-  const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>('all');
-  const [docsLoading, setDocsLoading] = useState(false);
-
-  // Manage Documents Dropdown & Modals State
-  const [isManageMenuOpen, setIsManageMenuOpen] = useState(false);
-  const [activeModal, setActiveModal] = useState<'update' | 'delete' | 'ingest' | null>(null);
-  const [selectedDocForAction, setSelectedDocForAction] = useState<TenantDocument | null>(null);
-
-  // Operation Feedback
-  const [opLoading, setOpLoading] = useState(false);
-  const [opStatus, setOpStatus] = useState<{ success: boolean; msg: string } | null>(null);
-
-  // Auth States
+  // Authentication & Profile
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  const [selectedTenant, setSelectedTenant] = useState<string>('');
+
+  // Navigation & View
+  const [activeTab, setActiveTab] = useState<'chat' | 'documents'>('chat');
+
+  // Chat & Q&A
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [question, setQuestion] = useState('');
+  const [isAsking, setIsAsking] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [activeSelectedChunk, setActiveSelectedChunk] = useState<Chunk | null>(null);
+
+  // Documents
+  const [documents, setDocuments] = useState<TenantDocument[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+  const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>('all');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const updateFileInputRef = useRef<HTMLInputElement>(null);
-  const manageMenuRef = useRef<HTMLDivElement>(null);
-  const answerRef = useRef<HTMLDivElement>(null);
+  const chatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Listen to Firebase Auth state
+  // Listen to Auth State
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (usr) => {
       setCurrentUser(usr);
@@ -130,25 +110,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Close Manage Menu when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (manageMenuRef.current && !manageMenuRef.current.contains(event.target as Node)) {
-        setIsManageMenuOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  // Check Backend health on load
-  useEffect(() => {
-    fetch(`${API_BASE}/`)
-      .then((res) => setBackendOnline(res.ok))
-      .catch(() => setBackendOnline(false));
-  }, []);
-
-  // Fetch User Profile from Firebase Database
+  // Fetch User Profile on Login
   const fetchUserProfile = async () => {
     if (!currentUser) return;
     try {
@@ -160,12 +122,9 @@ export default function App() {
       if (res.ok && data.profile) {
         setUserProfile(data.profile);
         setSelectedTenant(data.profile.tenant_id || data.assigned_tenant || '');
-        setErrorMsg(null);
-      } else {
-        setErrorMsg(data.detail || 'Access Denied: Your User ID has not been registered in the database.');
       }
-    } catch {
-      setErrorMsg('Error connecting to backend server.');
+    } catch (err) {
+      console.error('Error fetching profile:', err);
     }
   };
 
@@ -175,7 +134,7 @@ export default function App() {
     }
   }, [currentUser]);
 
-  // Fetch Documents for the active tenant
+  // Fetch Documents belonging to this student's tenant
   const fetchTenantDocuments = async () => {
     if (!currentUser) return;
     setDocsLoading(true);
@@ -201,1320 +160,928 @@ export default function App() {
     if (currentUser && selectedTenant) {
       fetchTenantDocuments();
     }
-  }, [selectedTenant, currentUser]);
+  }, [currentUser, selectedTenant]);
 
-  // Update timer while streaming
+  // Auto-scroll chat to bottom
   useEffect(() => {
-    let interval: any;
-    if (isStreaming && streamStartTime) {
-      interval = setInterval(() => {
-        setElapsedTime(Math.round((Date.now() - streamStartTime) / 100) / 10);
-      }, 100);
-    }
-    return () => clearInterval(interval);
-  }, [isStreaming, streamStartTime]);
+    chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isAsking]);
 
-  // Scroll to bottom of answer while streaming
-  useEffect(() => {
-    if (answerRef.current && isStreaming) {
-      answerRef.current.scrollTop = answerRef.current.scrollHeight;
-    }
-  }, [streamedAnswer, isStreaming]);
-
-  // 1. Switch User Tenant Assignment in Firebase Database
-  const handleSelectTenant = async (newTenant: string) => {
-    setSelectedTenant(newTenant);
-    setSelectedSourceFilter('all');
-    setOpStatus(null);
-    try {
-      const token = await currentUser?.getIdToken();
-      const res = await fetch(`${API_BASE}/user/select-tenant`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ tenant_id: newTenant }),
-      });
-      const data = await res.json();
-      if (res.ok && data.profile) {
-        setUserProfile(data.profile);
-        fetchTenantDocuments();
-      }
-    } catch {}
-  };
-
-  // 2. Action: Add Document (Upload PDF, DOCX, DOC)
-  const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setIsManageMenuOpen(false);
-    setOpLoading(true);
-    setOpStatus(null);
+  // Upload and Ingest Notes / Images / PDFs
+  const handleFileUpload = async (file: File) => {
+    if (!currentUser) return;
+    setUploadLoading(true);
+    setUploadStatus(`Uploading ${file.name}...`);
 
     try {
-      const token = await currentUser?.getIdToken();
+      const token = await currentUser.getIdToken();
       const formData = new FormData();
       formData.append('file', file);
 
-      const res = await fetch(`${API_BASE}/documents/upload`, {
+      const uploadRes = await fetch(`${API_BASE}/documents/upload`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${token}` },
         body: formData,
       });
-      const data = await res.json();
 
-      if (res.ok) {
-        setOpStatus({
-          success: true,
-          msg: `Uploaded "${file.name}". You can now ingest it through the pipeline.`,
-        });
-        fetchTenantDocuments();
-      } else {
-        setOpStatus({ success: false, msg: data.detail || 'Upload failed.' });
+      const uploadData = await uploadRes.json();
+      if (!uploadRes.ok) {
+        throw new Error(uploadData.detail || 'Upload failed');
       }
+
+      const docId = uploadData.document?.doc_id;
+      setUploadStatus(`Running OCR & Embedding into Tenant Shard...`);
+
+      // Trigger automatic chunking, PaddleOCR & vector ingestion
+      const ingestRes = await fetch(`${API_BASE}/documents/ingest`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ doc_id: docId }),
+      });
+
+      const ingestData = await ingestRes.json();
+      if (!ingestRes.ok) {
+        throw new Error(ingestData.detail || 'Ingestion failed');
+      }
+
+      setUploadStatus(`✓ Ready! Ingested ${ingestData.chunks_ingested} chunks.`);
+      await fetchTenantDocuments();
+      setTimeout(() => setUploadStatus(null), 3500);
     } catch (err: any) {
-      setOpStatus({ success: false, msg: err.message || 'Upload error.' });
+      setUploadStatus(`❌ ${err.message || 'Error processing file'}`);
+      setTimeout(() => setUploadStatus(null), 5000);
     } finally {
-      setOpLoading(false);
+      setUploadLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
-  // 3. Action: Ingest Document
-  const handleIngestDocument = async (docId: string) => {
-    setActiveModal(null);
-    setOpLoading(true);
-    setOpStatus(null);
-
-    // Optimistically update document status to processing
-    setDocuments((prev) =>
-      prev.map((d) => (d.doc_id === docId ? { ...d, status: 'processing' } : d))
-    );
-
+  // Delete Document
+  const handleDeleteDocument = async (docId: string, filename: string) => {
+    if (!currentUser || !window.confirm(`Delete "${filename}" and its vector embeddings?`)) return;
     try {
-      const token = await currentUser?.getIdToken();
-      const res = await fetch(`${API_BASE}/documents/ingest`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ doc_id: docId }),
-      });
-      const data = await res.json();
-
-      if (res.ok) {
-        setOpStatus({
-          success: true,
-          msg: `Ingested ${data.chunks_ingested} chunks into Tenant [${selectedTenant.toUpperCase()}]!`,
-        });
-        fetchTenantDocuments();
-      } else {
-        setOpStatus({ success: false, msg: data.detail || 'Ingestion failed.' });
-        fetchTenantDocuments();
-      }
-    } catch (err: any) {
-      setOpStatus({ success: false, msg: err.message || 'Ingestion error.' });
-      fetchTenantDocuments();
-    } finally {
-      setOpLoading(false);
-    }
-  };
-
-  // 4. Action: Update Document
-  const handleUpdateDocumentSubmit = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file || !selectedDocForAction) return;
-
-    setActiveModal(null);
-    setOpLoading(true);
-    setOpStatus(null);
-
-    try {
-      const token = await currentUser?.getIdToken();
-      const formData = new FormData();
-      formData.append('doc_id', selectedDocForAction.doc_id);
-      formData.append('file', file);
-
-      const res = await fetch(`${API_BASE}/documents/update`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${token}` },
-        body: formData,
-      });
-      const data = await res.json();
-
-      if (res.ok) {
-        setOpStatus({
-          success: true,
-          msg: `Updated "${file.name}" to version ${data.document?.version || 2} with ${data.document?.chunk_count || 0} chunks!`,
-        });
-        fetchTenantDocuments();
-      } else {
-        setOpStatus({ success: false, msg: data.detail || 'Update failed.' });
-      }
-    } catch (err: any) {
-      setOpStatus({ success: false, msg: err.message || 'Update error.' });
-    } finally {
-      setOpLoading(false);
-      setSelectedDocForAction(null);
-      if (updateFileInputRef.current) updateFileInputRef.current.value = '';
-    }
-  };
-
-  // 5. Action: Delete Document
-  const handleDeleteDocument = async (docId: string) => {
-    setActiveModal(null);
-    setOpLoading(true);
-    setOpStatus(null);
-
-    try {
-      const token = await currentUser?.getIdToken();
+      const token = await currentUser.getIdToken();
       const res = await fetch(`${API_BASE}/documents/delete`, {
         method: 'DELETE',
         headers: {
-          'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
         body: JSON.stringify({ doc_id: docId }),
       });
-      const data = await res.json();
-
       if (res.ok) {
-        setOpStatus({
-          success: true,
-          msg: `Permanently deleted document and its vector chunks from Tenant [${selectedTenant.toUpperCase()}].`,
-        });
-        fetchTenantDocuments();
-      } else {
-        setOpStatus({ success: false, msg: data.detail || 'Delete failed.' });
+        await fetchTenantDocuments();
       }
-    } catch (err: any) {
-      setOpStatus({ success: false, msg: err.message || 'Delete error.' });
-    } finally {
-      setOpLoading(false);
-      setSelectedDocForAction(null);
+    } catch (err) {
+      console.error('Delete error:', err);
     }
   };
 
-  // Handle Ask with SSE Streaming & Tenant Scoping
-  const handleAsk = async (queryText?: string) => {
-    const q = (queryText || question).trim();
-    if (!q || isStreaming) return;
+  // Submit Question to RAG Pipeline
+  const handleAsk = async (customPrompt?: string) => {
+    const q = customPrompt || question;
+    if (!q.trim() || !currentUser || isAsking) return;
 
-    setErrorMsg(null);
-    setStreamedAnswer('');
-    setTokenCount(0);
-    setRetrievedChunks([]);
-    setRerankedChunks([]);
-    setIsStreaming(true);
-    setStreamStartTime(Date.now());
-    setElapsedTime(0);
+    const studentMsg: ChatMessage = {
+      id: String(Date.now()),
+      sender: 'student',
+      text: q.trim(),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    setMessages((prev) => [...prev, studentMsg]);
+    setQuestion('');
+    setIsAsking(true);
 
     try {
-      const token = await currentUser?.getIdToken();
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (token) headers['Authorization'] = `Bearer ${token}`;
-
-      const response = await fetch(`${API_BASE}/ask-stream`, {
+      const token = await currentUser.getIdToken();
+      const res = await fetch(`${API_BASE}/question/ask`, {
         method: 'POST',
-        headers,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          question: q,
+          question: q.trim(),
           source_filter: selectedSourceFilter === 'all' ? null : selectedSourceFilter,
-          tenant_id: selectedTenant,
         }),
       });
 
-      if (!response.ok) {
-        const errJson = await response.json().catch(() => null);
-        throw new Error(errJson?.detail || `Server returned status ${response.status}`);
-      }
-
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
-      if (!reader) throw new Error('No readable stream available');
-
-      let accumulated = '';
-      let tokens = 0;
-      let buffer = '';
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6).trim();
-            if (!jsonStr) continue;
-            try {
-              const parsed = JSON.parse(jsonStr);
-              if (parsed.type === 'metadata') {
-                if (parsed.chunks) setRetrievedChunks(parsed.chunks);
-                if (parsed.reranked) setRerankedChunks(parsed.reranked);
-              } else if (parsed.type === 'token') {
-                accumulated += parsed.token;
-                tokens += 1;
-                setStreamedAnswer(accumulated);
-                setTokenCount(tokens);
-              } else if (parsed.type === 'error') {
-                setErrorMsg(parsed.error);
-              } else if (parsed.type === 'done') {
-                setIsStreaming(false);
-              }
-            } catch {}
-          }
+      const data = await res.json();
+      if (res.ok) {
+        const aiMsg: ChatMessage = {
+          id: String(Date.now() + 1),
+          sender: 'ai',
+          text: data.answer || 'No response generated.',
+          sources: data.retrieved_chunks || [],
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, aiMsg]);
+        if (data.retrieved_chunks && data.retrieved_chunks.length > 0) {
+          setActiveSelectedChunk(data.retrieved_chunks[0]);
         }
+      } else {
+        const errorMsgText: ChatMessage = {
+          id: String(Date.now() + 1),
+          sender: 'ai',
+          text: `⚠️ **Error:** ${data.detail || 'Could not retrieve answer. Please make sure documents are uploaded and indexed.'}`,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, errorMsgText]);
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Error fetching answer');
+      const errorMsgText: ChatMessage = {
+        id: String(Date.now() + 1),
+        sender: 'ai',
+        text: `⚠️ **Connection Error:** Could not connect to backend server.`,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, errorMsgText]);
     } finally {
-      setIsStreaming(false);
+      setIsAsking(false);
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-      e.preventDefault();
-      handleAsk();
-    }
+  const copyToClipboard = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleCopy = () => {
-    if (!streamedAnswer) return;
-    navigator.clipboard.writeText(streamedAnswer);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  const formatDate = (isoString: string) => {
-    if (!isoString) return '';
-    try {
-      const d = new Date(isoString);
-      return d.toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return isoString;
-    }
-  };
-
+  // Auth Loading Screen
   if (authLoading) {
     return (
-      <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0B1120', color: '#38BDF8' }}>
-        <RefreshCw size={28} className="spin" />
-        <span style={{ marginLeft: '12px', fontSize: '15px' }}>Loading Multi-Tenant Workspace...</span>
+      <div style={{ display: 'flex', height: '100vh', alignItems: 'center', justifyContent: 'center', background: '#0F172A', color: '#F8FAFC' }}>
+        <RefreshCw className="animate-spin" size={32} style={{ color: '#8B5CF6' }} />
       </div>
     );
   }
 
+  // Not logged in -> Show Auth Page
   if (!currentUser) {
     return <AuthPage />;
   }
 
-  return (
-    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: '#0B1120', color: '#F8FAFC', fontFamily: 'Inter, system-ui, sans-serif' }}>
-      {/* Hidden file inputs for document operations */}
-      <input
-        type="file"
-        ref={fileInputRef}
-        onChange={handleUploadFile}
-        accept=".pdf,.docx,.doc"
-        style={{ display: 'none' }}
-      />
-      <input
-        type="file"
-        ref={updateFileInputRef}
-        onChange={handleUpdateDocumentSubmit}
-        accept=".pdf,.docx,.doc"
-        style={{ display: 'none' }}
-      />
+  const studentName = currentUser.displayName || currentUser.email?.split('@')[0] || 'Student';
+  const tenantDisplay = selectedTenant ? `${selectedTenant.slice(0, 8)}...` : 'Assigning...';
 
-      {/* TOP HEADER */}
-      <header style={{ height: '62px', borderBottom: '1px solid #1E293B', backgroundColor: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 24px', flexShrink: 0 }}>
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#0B1120', color: '#F8FAFC', overflow: 'hidden' }}>
+      {/* ==========================================
+          TOP HEADER BAR
+      ========================================== */}
+      <header
+        style={{
+          height: '60px',
+          borderBottom: '1px solid #1E293B',
+          background: '#0F172A',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          padding: '0 20px',
+          flexShrink: 0,
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{ width: '38px', height: '38px', borderRadius: '10px', background: 'linear-gradient(135deg, #0284C7, #2563EB)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(2, 132, 199, 0.3)' }}>
-            <Database size={20} color="#FFFFFF" />
+          <div
+            style={{
+              width: '38px',
+              height: '38px',
+              borderRadius: '10px',
+              background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#FFFFFF',
+              boxShadow: '0 4px 12px rgba(99, 102, 241, 0.3)',
+            }}
+          >
+            <GraduationCap size={22} />
           </div>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontWeight: 700, fontSize: '16px', letterSpacing: '-0.3px', color: '#F8FAFC' }}>
-                Multi-Tenant RAG Assistant
-              </span>
-              <span style={{ fontSize: '10px', backgroundColor: '#1E293B', color: '#38BDF8', padding: '2px 8px', borderRadius: '12px', border: '1px solid #334155', fontWeight: 600 }}>
-                Enterprise
-              </span>
-            </div>
-            <div style={{ fontSize: '11px', color: '#64748B' }}>
-              Weaviate Sharded Isolation • Firebase Auth • Gemini 2.5
-            </div>
+            <h1 style={{ fontSize: '16px', fontWeight: 700, letterSpacing: '-0.3px', margin: 0, color: '#F8FAFC' }}>
+              Student AI Assistant
+            </h1>
+            <span style={{ fontSize: '11px', color: '#94A3B8' }}>OCR + Weaviate Multi-Tenant RAG</span>
           </div>
         </div>
 
-        {/* Header Right: Status, Tenant & User */}
+        {/* Center Navigation Tabs */}
+        <div style={{ display: 'flex', gap: '6px', background: '#1E293B', padding: '4px', borderRadius: '10px', border: '1px solid #334155' }}>
+          <button
+            onClick={() => setActiveTab('chat')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              fontSize: '13px',
+              fontWeight: 500,
+              borderRadius: '7px',
+              border: 'none',
+              cursor: 'pointer',
+              background: activeTab === 'chat' ? '#6366F1' : 'transparent',
+              color: activeTab === 'chat' ? '#FFFFFF' : '#94A3B8',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <MessageSquare size={15} /> Chat with Notes
+          </button>
+          <button
+            onClick={() => setActiveTab('documents')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              fontSize: '13px',
+              fontWeight: 500,
+              borderRadius: '7px',
+              border: 'none',
+              cursor: 'pointer',
+              background: activeTab === 'documents' ? '#6366F1' : 'transparent',
+              color: activeTab === 'documents' ? '#FFFFFF' : '#94A3B8',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <BookOpen size={15} /> My Notes ({documents.length})
+          </button>
+        </div>
+
+        {/* Right User & Tenant Status */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-          {/* Backend Status Pill */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', padding: '5px 12px', borderRadius: '20px', backgroundColor: backendOnline ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)', border: `1px solid ${backendOnline ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`, color: backendOnline ? '#34D399' : '#F87171' }}>
-            <div style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: backendOnline ? '#10B981' : '#EF4444' }} />
-            <span>{backendOnline ? 'Backend Online (Port 8000)' : 'Backend Offline'}</span>
+          {/* Tenant Shard Pill */}
+          <div
+            title={`Weaviate Tenant Shard: ${selectedTenant}`}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              background: 'rgba(99, 102, 241, 0.12)',
+              border: '1px solid rgba(99, 102, 241, 0.3)',
+              padding: '5px 12px',
+              borderRadius: '20px',
+              fontSize: '12px',
+              color: '#A5B4FC',
+              fontWeight: 500,
+            }}
+          >
+            <Lock size={12} style={{ color: '#818CF8' }} />
+            <span>Shard: <strong style={{ color: '#FFFFFF' }}>{tenantDisplay}</strong></span>
           </div>
 
-          {/* Active Tenant Badge */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', padding: '5px 12px', borderRadius: '8px', backgroundColor: '#1E293B', border: '1px solid #334155', color: '#38BDF8' }}>
-            <Building2 size={13} />
-            <span style={{ fontWeight: 600 }}>Tenant: {selectedTenant.toUpperCase()}</span>
-          </div>
-
-          {/* User Account Button */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '4px 10px', borderRadius: '8px', backgroundColor: '#1E293B', border: '1px solid #334155' }}>
-            <div style={{ width: '24px', height: '24px', borderRadius: '50%', backgroundColor: '#0284C7', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 700, color: '#FFFFFF' }}>
-              {currentUser.email ? currentUser.email.charAt(0).toUpperCase() : 'U'}
+          {/* Student Profile & Sign Out */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div
+              style={{
+                width: '32px',
+                height: '32px',
+                borderRadius: '50%',
+                background: '#6366F1',
+                color: '#FFFFFF',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '13px',
+                fontWeight: 600,
+              }}
+            >
+              {studentName.charAt(0).toUpperCase()}
             </div>
-            <span style={{ fontSize: '12px', color: '#F1F5F9', maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {currentUser.email || 'User'}
-            </span>
             <button
               onClick={() => signOut(auth)}
-              title="Sign Out"
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94A3B8', display: 'flex', alignItems: 'center', padding: '2px' }}
+              style={{
+                background: 'transparent',
+                border: '1px solid #334155',
+                color: '#94A3B8',
+                padding: '5px 10px',
+                borderRadius: '7px',
+                fontSize: '12px',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#EF4444')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = '#94A3B8')}
             >
-              <LogOut size={14} />
+              Sign Out
             </button>
           </div>
         </div>
       </header>
 
-      {/* MAIN 3-COLUMN LAYOUT */}
-      <div style={{ flex: 1, display: 'grid', gridTemplateColumns: '320px 1fr 340px', height: 'calc(100vh - 62px)', overflow: 'hidden' }}>
+      {/* ==========================================
+          MAIN 3-COLUMN WORKSPACE BODY
+      ========================================== */}
+      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+        {/* ==========================================
+            LEFT SIDEBAR: Notes Navigation & Quick Docs
+        ========================================== */}
+        <aside
+          style={{
+            width: '260px',
+            borderRight: '1px solid #1E293B',
+            background: '#0F172A',
+            display: 'flex',
+            flexDirection: 'column',
+            flexShrink: 0,
+            padding: '16px',
+          }}
+        >
+          {/* New Chat Button */}
+          <button
+            onClick={() => setMessages([])}
+            style={{
+              width: '100%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              padding: '10px 14px',
+              background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+              border: 'none',
+              borderRadius: '9px',
+              color: '#FFFFFF',
+              fontWeight: 600,
+              fontSize: '13px',
+              cursor: 'pointer',
+              boxShadow: '0 4px 12px rgba(99, 102, 241, 0.25)',
+              marginBottom: '18px',
+            }}
+          >
+            <Plus size={16} /> New Chat
+          </button>
 
-        {/* LEFT COLUMN: TENANT & DOCUMENT MANAGEMENT */}
-        <aside style={{ backgroundColor: '#0F172A', borderRight: '1px solid #1E293B', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+          {/* Upload Button Shortcut */}
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={(e) => e.target.files?.[0] && handleFileUpload(e.target.files[0])}
+            style={{ display: 'none' }}
+            accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp"
+          />
 
-          {/* User & Tenant Info */}
-          <div style={{ padding: '16px', borderBottom: '1px solid #1E293B' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: '#94A3B8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-                <ShieldCheck size={14} color="#10B981" />
-                Firebase Authorisation
-              </div>
-              <span style={{ fontSize: '10.5px', color: '#10B981', backgroundColor: 'rgba(16, 185, 129, 0.1)', padding: '2px 6px', borderRadius: '4px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                Active
-              </span>
-            </div>
-
-            {/* Single Assigned Tenant Display (No other tenants shown) */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ fontSize: '11px', color: '#64748B', fontWeight: 600 }}>Assigned Workspace Tenant</label>
-              <div
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: '6px',
-                  backgroundColor: 'rgba(56, 189, 248, 0.12)',
-                  border: '1px solid rgba(56, 189, 248, 0.35)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                }}
-              >
-                <Building2 size={15} color="#38BDF8" />
-                <span style={{ fontSize: '12.5px', fontWeight: 700, color: '#38BDF8' }}>
-                  Tenant {selectedTenant.toUpperCase()}
-                </span>
-              </div>
-            </div>
-
-            {/* Permissions Badges */}
-            <div style={{ marginTop: '10px', display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
-              {(userProfile?.permissions || ['READ', 'WRITE', 'UPDATE', 'DELETE', 'INGEST']).map((p) => (
-                <span
-                  key={p}
-                  style={{
-                    fontSize: '9.5px',
-                    backgroundColor: '#1E293B',
-                    color: '#94A3B8',
-                    padding: '2px 6px',
-                    borderRadius: '4px',
-                    border: '1px solid #334155',
-                    fontFamily: 'monospace',
-                  }}
-                >
-                  {p}
-                </span>
-              ))}
-            </div>
+          {/* Notes List Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+            <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+              Study Materials ({documents.length})
+            </span>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploadLoading}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: '#818CF8',
+                fontSize: '12px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+              }}
+            >
+              <Plus size={13} /> Add
+            </button>
           </div>
 
-          {/* MANAGE DOCUMENTS SECTION */}
-          <div style={{ padding: '16px', display: 'flex', flexDirection: 'column', gap: '12px', borderBottom: '1px solid #1E293B' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontSize: '12px', fontWeight: 700, color: '#F1F5F9', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Layers size={14} color="#38BDF8" />
-                Document Operations
-              </span>
-              <span style={{ fontSize: '11px', color: '#64748B' }}>
-                {documents.length} {documents.length === 1 ? 'doc' : 'docs'}
-              </span>
-            </div>
-
-            {/* Single Main Button: Manage Documents with Dropdown */}
-            <div style={{ position: 'relative' }} ref={manageMenuRef}>
-              <button
-                onClick={() => setIsManageMenuOpen(!isManageMenuOpen)}
-                disabled={opLoading}
-                style={{
-                  width: '100%',
-                  padding: '9px 14px',
-                  borderRadius: '8px',
-                  backgroundColor: '#0284C7',
-                  color: '#FFFFFF',
-                  border: 'none',
-                  fontSize: '13px',
-                  fontWeight: 600,
-                  cursor: opLoading ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  boxShadow: '0 4px 14px rgba(2, 132, 199, 0.3)',
-                  opacity: opLoading ? 0.7 : 1,
-                  transition: 'background 0.2s',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <SlidersHorizontal size={15} />
-                  <span>Manage Documents</span>
-                </div>
-                <ChevronDown size={15} style={{ transform: isManageMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
-              </button>
-
-              {/* Dropdown Menu */}
-              {isManageMenuOpen && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 6px)',
-                    left: 0,
-                    right: 0,
-                    backgroundColor: '#1E293B',
-                    borderRadius: '8px',
-                    border: '1px solid #334155',
-                    boxShadow: '0 10px 25px rgba(0, 0, 0, 0.5)',
-                    zIndex: 50,
-                    overflow: 'hidden',
-                  }}
-                >
-                  {/* Option 1: Add Document */}
-                  <button
-                    onClick={() => {
-                      setIsManageMenuOpen(false);
-                      fileInputRef.current?.click();
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '10px',
-                      background: 'none',
-                      border: 'none',
-                      borderBottom: '1px solid #334155',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      color: '#F8FAFC',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#273549')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-                  >
-                    <UploadCloud size={16} color="#38BDF8" style={{ marginTop: '2px', flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: '12.5px', fontWeight: 600 }}>Add Document</div>
-                      <div style={{ fontSize: '11px', color: '#94A3B8' }}>Upload a new PDF, DOCX, or DOC file</div>
-                    </div>
-                  </button>
-
-                  {/* Option 2: Update Document */}
-                  <button
-                    onClick={() => {
-                      setIsManageMenuOpen(false);
-                      if (documents.length === 0) {
-                        setOpStatus({ success: false, msg: 'No documents available to update.' });
-                        return;
-                      }
-                      setSelectedDocForAction(documents[0]);
-                      setActiveModal('update');
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '10px',
-                      background: 'none',
-                      border: 'none',
-                      borderBottom: '1px solid #334155',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      color: '#F8FAFC',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#273549')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-                  >
-                    <RefreshCw size={15} color="#F59E0B" style={{ marginTop: '2px', flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: '12.5px', fontWeight: 600 }}>Update Document</div>
-                      <div style={{ fontSize: '11px', color: '#94A3B8' }}>Replace an existing document with a new version</div>
-                    </div>
-                  </button>
-
-                  {/* Option 3: Delete Document */}
-                  <button
-                    onClick={() => {
-                      setIsManageMenuOpen(false);
-                      if (documents.length === 0) {
-                        setOpStatus({ success: false, msg: 'No documents available to delete.' });
-                        return;
-                      }
-                      setSelectedDocForAction(documents[0]);
-                      setActiveModal('delete');
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '10px',
-                      background: 'none',
-                      border: 'none',
-                      borderBottom: '1px solid #334155',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      color: '#F8FAFC',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#273549')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-                  >
-                    <Trash2 size={15} color="#EF4444" style={{ marginTop: '2px', flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: '12.5px', fontWeight: 600 }}>Delete Document</div>
-                      <div style={{ fontSize: '11px', color: '#94A3B8' }}>Permanently remove document & vector chunks</div>
-                    </div>
-                  </button>
-
-                  {/* Option 4: Ingest Document */}
-                  <button
-                    onClick={() => {
-                      setIsManageMenuOpen(false);
-                      if (documents.length === 0) {
-                        setOpStatus({ success: false, msg: 'No documents uploaded yet to ingest.' });
-                        return;
-                      }
-                      setSelectedDocForAction(documents[0]);
-                      setActiveModal('ingest');
-                    }}
-                    style={{
-                      width: '100%',
-                      padding: '10px 14px',
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '10px',
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      color: '#F8FAFC',
-                    }}
-                    onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = '#273549')}
-                    onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
-                  >
-                    <Zap size={15} color="#10B981" style={{ marginTop: '2px', flexShrink: 0 }} />
-                    <div>
-                      <div style={{ fontSize: '12.5px', fontWeight: 600 }}>Ingest Document</div>
-                      <div style={{ fontSize: '11px', color: '#94A3B8' }}>Chunk, embed & index in Weaviate shard</div>
-                    </div>
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Status Alert Banner */}
-            {opStatus && (
-              <div
-                style={{
-                  padding: '8px 10px',
-                  borderRadius: '6px',
-                  fontSize: '11.5px',
-                  display: 'flex',
-                  alignItems: 'flex-start',
-                  gap: '6px',
-                  backgroundColor: opStatus.success ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                  border: `1px solid ${opStatus.success ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
-                  color: opStatus.success ? '#34D399' : '#F87171',
-                }}
-              >
-                {opStatus.success ? <CheckCircle size={14} style={{ marginTop: '1px', flexShrink: 0 }} /> : <AlertCircle size={14} style={{ marginTop: '1px', flexShrink: 0 }} />}
-                <span>{opStatus.msg}</span>
-              </div>
-            )}
-          </div>
-
-          {/* TENANT DOCUMENTS LIST */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ fontSize: '11px', fontWeight: 600, color: '#64748B', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '2px' }}>
-              Authorized Tenant Documents
-            </div>
-
-            {docsLoading ? (
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '32px 0', color: '#94A3B8', fontSize: '12px', gap: '8px' }}>
-                <RefreshCw size={14} className="spin" />
-                <span>Loading documents...</span>
-              </div>
-            ) : documents.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '36px 12px', border: '1px dashed #334155', borderRadius: '8px', color: '#94A3B8' }}>
-                <FileText size={32} style={{ margin: '0 auto 10px', opacity: 0.35, color: '#38BDF8' }} />
-                <p style={{ fontSize: '12.5px', fontWeight: 500, margin: 0, color: '#CBD5E1', lineHeight: '1.4' }}>
-                  No documents available. Click Manage Documents to add your first document.
-                </p>
+          {/* Document list */}
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {documents.length === 0 ? (
+              <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748B', fontSize: '12px' }}>
+                <FileText size={28} style={{ opacity: 0.3, marginBottom: '8px' }} />
+                <p>No notes uploaded yet.</p>
+                <p style={{ fontSize: '11px', marginTop: '4px' }}>Upload PDF slides or handwritten photos.</p>
               </div>
             ) : (
               documents.map((doc) => {
-                const isSelected = selectedSourceFilter === doc.filename;
+                const isImage = ['PNG', 'JPG', 'JPEG', 'WEBP'].includes(doc.file_type);
                 return (
                   <div
                     key={doc.doc_id}
                     style={{
-                      padding: '10px',
-                      borderRadius: '8px',
-                      backgroundColor: isSelected ? 'rgba(56, 189, 248, 0.08)' : '#1E293B',
-                      border: isSelected ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid #334155',
                       display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                      transition: 'border 0.15s ease',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 10px',
+                      background: '#1E293B',
+                      borderRadius: '8px',
+                      border: '1px solid #334155',
                     }}
                   >
-                    <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '6px' }}>
-                      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', minWidth: 0 }}>
-                        <FileText size={15} color="#38BDF8" style={{ marginTop: '2px', flexShrink: 0 }} />
-                        <div style={{ minWidth: 0 }}>
-                          <div
-                            style={{
-                              fontSize: '12px',
-                              fontWeight: 600,
-                              color: '#F1F5F9',
-                              whiteSpace: 'nowrap',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              maxWidth: '180px',
-                            }}
-                            title={doc.filename}
-                          >
-                            {doc.filename}
-                          </div>
-                          <div style={{ fontSize: '10px', color: '#64748B' }}>
-                            {formatDate(doc.upload_timestamp)} • v{doc.version}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* File type pill */}
-                      <span
-                        style={{
-                          fontSize: '9px',
-                          fontWeight: 700,
-                          backgroundColor: '#0F172A',
-                          color: '#38BDF8',
-                          padding: '1px 5px',
-                          borderRadius: '4px',
-                          border: '1px solid #334155',
-                          textTransform: 'uppercase',
-                        }}
-                      >
-                        {doc.file_type}
-                      </span>
-                    </div>
-
-                    {/* Status & Action Row */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2px' }}>
-                      {/* Ingestion Status Badge */}
-                      {doc.status === 'completed' ? (
-                        <span style={{ fontSize: '10.5px', color: '#34D399', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <CheckCircle size={11} />
-                          {doc.chunk_count} chunks indexed
-                        </span>
-                      ) : doc.status === 'processing' ? (
-                        <span style={{ fontSize: '10.5px', color: '#FBBF24', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <RefreshCw size={11} className="spin" />
-                          Processing...
-                        </span>
-                      ) : doc.status === 'failed' ? (
-                        <span style={{ fontSize: '10.5px', color: '#F87171', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <AlertCircle size={11} />
-                          Failed
-                        </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                      {isImage ? (
+                        <ImageIcon size={16} style={{ color: '#F472B6', flexShrink: 0 }} />
                       ) : (
-                        <span style={{ fontSize: '10.5px', color: '#94A3B8', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                          <FileUp size={11} />
-                          Uploaded (Not Ingested)
-                        </span>
+                        <FileText size={16} style={{ color: '#818CF8', flexShrink: 0 }} />
                       )}
-
-                      {/* Card Quick Actions */}
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        {doc.status !== 'completed' && doc.status !== 'processing' && (
-                          <button
-                            onClick={() => handleIngestDocument(doc.doc_id)}
-                            title="Ingest document into Weaviate"
-                            style={{
-                              background: 'none',
-                              border: '1px solid #0284C7',
-                              borderRadius: '4px',
-                              padding: '2px 6px',
-                              fontSize: '10px',
-                              fontWeight: 600,
-                              color: '#38BDF8',
-                              cursor: 'pointer',
-                            }}
-                          >
-                            Ingest
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            setSelectedDocForAction(doc);
-                            setActiveModal('update');
-                          }}
-                          title="Update document"
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: '#94A3B8',
-                            cursor: 'pointer',
-                            padding: '3px',
-                          }}
-                        >
-                          <RefreshCw size={12} />
-                        </button>
-                        <button
-                          onClick={() => {
-                            setSelectedDocForAction(doc);
-                            setActiveModal('delete');
-                          }}
-                          title="Delete document"
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: '#F87171',
-                            cursor: 'pointer',
-                            padding: '3px',
-                          }}
-                        >
-                          <Trash2 size={12} />
-                        </button>
+                      <div style={{ minWidth: 0 }}>
+                        <p style={{ fontSize: '12px', fontWeight: 500, color: '#F8FAFC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', margin: 0 }}>
+                          {doc.filename}
+                        </p>
+                        <span style={{ fontSize: '10px', color: doc.status === 'completed' ? '#10B981' : '#F59E0B' }}>
+                          {doc.status === 'completed' ? `${doc.chunk_count} chunks` : doc.status}
+                        </span>
                       </div>
                     </div>
+                    <button
+                      onClick={() => handleDeleteDocument(doc.doc_id, doc.filename)}
+                      title="Delete Note"
+                      style={{ background: 'transparent', border: 'none', color: '#64748B', cursor: 'pointer', padding: '4px' }}
+                      onMouseEnter={(e) => (e.currentTarget.style.color = '#EF4444')}
+                      onMouseLeave={(e) => (e.currentTarget.style.color = '#64748B')}
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
                 );
               })
             )}
           </div>
+
+          {/* Privacy & Tenant Footer Card */}
+          <div
+            style={{
+              marginTop: '12px',
+              padding: '12px',
+              background: 'rgba(99, 102, 241, 0.08)',
+              border: '1px solid rgba(99, 102, 241, 0.2)',
+              borderRadius: '9px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#A5B4FC', fontSize: '11px', fontWeight: 600 }}>
+              <ShieldCheck size={14} style={{ color: '#10B981' }} />
+              1-to-1 Tenant Isolation
+            </div>
+            <p style={{ fontSize: '10px', color: '#94A3B8', marginTop: '4px', lineHeight: 1.4 }}>
+              Your notes are stored strictly in your dedicated Weaviate shard. No other student can query your data.
+            </p>
+          </div>
         </aside>
 
-        {/* MIDDLE COLUMN: QUERY & STREAMING ANSWER */}
-        <main style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', backgroundColor: '#0B1120' }}>
+        {/* ==========================================
+            CENTER PANEL: Main Study Chat & Q&A
+        ========================================== */}
+        <main
+          style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            background: '#0B1120',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Scrollable Chat Area */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }}>
+            {/* Top Welcome Banner */}
+            <div
+              style={{
+                background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(139, 92, 246, 0.08))',
+                border: '1px solid rgba(99, 102, 241, 0.25)',
+                borderRadius: '14px',
+                padding: '20px 24px',
+                marginBottom: '20px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div>
+                  <h2 style={{ fontSize: '20px', fontWeight: 700, color: '#FFFFFF', margin: '0 0 6px 0' }}>
+                    👋 Hi, {studentName}!
+                  </h2>
+                  <p style={{ fontSize: '13px', color: '#94A3B8', margin: 0 }}>
+                    Your personal AI study assistant. Upload handwritten notes, PDFs, or photos and ask anything about them.
+                  </p>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploadLoading}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '7px',
+                      background: '#6366F1',
+                      border: 'none',
+                      color: '#FFFFFF',
+                      padding: '9px 18px',
+                      borderRadius: '9px',
+                      fontWeight: 600,
+                      fontSize: '13px',
+                      cursor: 'pointer',
+                      boxShadow: '0 4px 12px rgba(99, 102, 241, 0.3)',
+                    }}
+                  >
+                    <UploadCloud size={16} /> Upload Notes (OCR)
+                  </button>
+                </div>
+              </div>
 
-          {/* Query Filter Bar */}
-          <div style={{ padding: '12px 20px', borderBottom: '1px solid #1E293B', backgroundColor: '#0F172A', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <BookOpen size={15} color="#38BDF8" />
-              <span style={{ fontSize: '12.5px', color: '#94A3B8', fontWeight: 600 }}>Query Scope:</span>
-              <select
-                value={selectedSourceFilter}
-                onChange={(e) => setSelectedSourceFilter(e.target.value)}
-                style={{
-                  backgroundColor: '#1E293B',
-                  color: '#F1F5F9',
-                  border: '1px solid #334155',
-                  borderRadius: '6px',
-                  padding: '4px 10px',
-                  fontSize: '12px',
-                  outline: 'none',
-                  cursor: 'pointer',
-                  maxWidth: '280px',
-                }}
-              >
-                <option value="all">All Documents in Tenant [{selectedTenant.toUpperCase()}]</option>
-                {documents.map((d) => (
-                  <option key={d.doc_id} value={d.filename}>
-                    {d.filename}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <span style={{ fontSize: '11px', color: '#64748B' }}>
-              Isolated Shard: <strong>{selectedTenant}</strong>
-            </span>
-          </div>
-
-          {/* Ask Question Box */}
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid #1E293B', backgroundColor: '#0F172A' }}>
-            <div style={{ position: 'relative' }}>
-              <textarea
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder={`Ask a question about ${selectedTenant.toUpperCase()}'s documents... (Ctrl+Enter to ask)`}
-                rows={3}
-                style={{
-                  width: '100%',
-                  backgroundColor: '#1E293B',
-                  color: '#F8FAFC',
-                  border: '1px solid #334155',
-                  borderRadius: '8px',
-                  padding: '10px 14px',
-                  fontSize: '13px',
-                  resize: 'none',
-                  outline: 'none',
-                  boxSizing: 'border-box',
-                  fontFamily: 'inherit',
-                }}
-              />
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '8px' }}>
-                <span style={{ fontSize: '11px', color: '#64748B' }}>
-                  Press <kbd style={{ padding: '2px 5px', borderRadius: '4px', backgroundColor: '#334155', color: '#94A3B8' }}>Ctrl+Enter</kbd> to submit
-                </span>
-                <button
-                  onClick={() => handleAsk()}
-                  disabled={isStreaming || !question.trim()}
+              {/* Upload Status Notification Banner */}
+              {uploadStatus && (
+                <div
                   style={{
-                    backgroundColor: isStreaming || !question.trim() ? '#1E293B' : '#0284C7',
-                    color: '#FFFFFF',
-                    border: 'none',
-                    borderRadius: '6px',
-                    padding: '7px 16px',
-                    fontSize: '12.5px',
-                    fontWeight: 600,
-                    cursor: isStreaming || !question.trim() ? 'not-allowed' : 'pointer',
+                    marginTop: '12px',
+                    padding: '8px 14px',
+                    borderRadius: '8px',
+                    background: uploadStatus.startsWith('❌') ? 'rgba(239, 68, 68, 0.2)' : 'rgba(16, 185, 129, 0.15)',
+                    border: uploadStatus.startsWith('❌') ? '1px solid #EF4444' : '1px solid #10B981',
+                    fontSize: '12px',
+                    color: uploadStatus.startsWith('❌') ? '#FCA5A5' : '#6EE7B7',
                     display: 'flex',
                     alignItems: 'center',
                     gap: '6px',
-                    transition: 'all 0.15s',
                   }}
                 >
-                  {isStreaming ? (
-                    <>
-                      <RefreshCw size={13} className="spin" />
-                      <span>Thinking...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Send size={13} />
-                      <span>Ask Question</span>
-                    </>
-                  )}
-                </button>
-              </div>
+                  {uploadLoading && <RefreshCw size={13} className="animate-spin" />}
+                  {uploadStatus}
+                </div>
+              )}
             </div>
-          </div>
 
-          {/* Streaming Answer Container */}
-          <div style={{ flex: 1, padding: '20px', overflowY: 'auto', display: 'flex', flexDirection: 'column' }} ref={answerRef}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Sparkles size={16} color="#38BDF8" />
-                <span style={{ fontSize: '13.5px', fontWeight: 600, color: '#F1F5F9' }}>Answer</span>
-                {isStreaming && (
-                  <span style={{ fontSize: '11px', color: '#38BDF8', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                    <span className="pulsing-dot" /> Streaming from Gemini
+            {/* 4 Quick Action Study Pills */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '24px' }}>
+              <button
+                onClick={() => handleAsk('Explain the core concepts and key ideas from my uploaded notes in detail.')}
+                style={{
+                  background: '#1E293B',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  padding: '12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#6366F1')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#334155')}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <HelpCircle size={15} style={{ color: '#818CF8' }} />
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#F8FAFC' }}>Ask Questions</span>
+                </div>
+                <p style={{ fontSize: '11px', color: '#94A3B8', margin: 0 }}>Get clear answers from your notes</p>
+              </button>
+
+              <button
+                onClick={() => handleAsk('Provide a concise, comprehensive summary of the uploaded document with bullet points.')}
+                style={{
+                  background: '#1E293B',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  padding: '12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#6366F1')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#334155')}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <FileText size={15} style={{ color: '#A78BFA' }} />
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#F8FAFC' }}>Summarize</span>
+                </div>
+                <p style={{ fontSize: '11px', color: '#94A3B8', margin: 0 }}>Create quick high-yield summaries</p>
+              </button>
+
+              <button
+                onClick={() => handleAsk('Extract all important definitions, formulas, and key points from my notes.')}
+                style={{
+                  background: '#1E293B',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  padding: '12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#6366F1')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#334155')}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <FileCheck size={15} style={{ color: '#34D399' }} />
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#F8FAFC' }}>Extract Notes</span>
+                </div>
+                <p style={{ fontSize: '11px', color: '#94A3B8', margin: 0 }}>Get key points and definitions</p>
+              </button>
+
+              <button
+                onClick={() => handleAsk('Generate a 3-question practice quiz based on my notes with answers and explanations.')}
+                style={{
+                  background: '#1E293B',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  padding: '12px',
+                  textAlign: 'left',
+                  cursor: 'pointer',
+                  transition: 'all 0.15s',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.borderColor = '#6366F1')}
+                onMouseLeave={(e) => (e.currentTarget.style.borderColor = '#334155')}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <Sparkles size={15} style={{ color: '#FBBF24' }} />
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#F8FAFC' }}>Create Quiz</span>
+                </div>
+                <p style={{ fontSize: '11px', color: '#94A3B8', margin: 0 }}>Generate practice exam questions</p>
+              </button>
+            </div>
+
+            {/* Chat Messages Stream */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+              {messages.length === 0 && (
+                <div style={{ padding: '40px', textAlign: 'center', color: '#64748B' }}>
+                  <MessageSquare size={36} style={{ opacity: 0.25, marginBottom: '12px' }} />
+                  <p style={{ fontSize: '14px', margin: 0 }}>Ask any question about your uploaded notes or choose a quick study prompt above.</p>
+                </div>
+              )}
+
+              {messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: msg.sender === 'student' ? 'flex-end' : 'flex-start',
+                  }}
+                >
+                  {/* Sender indicator */}
+                  <span style={{ fontSize: '11px', color: '#64748B', marginBottom: '4px', marginLeft: msg.sender === 'ai' ? '40px' : 0 }}>
+                    {msg.sender === 'student' ? 'You' : 'AI Study Assistant'} • {msg.timestamp}
                   </span>
-                )}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                {streamedAnswer && (
-                  <>
-                    <span style={{ fontSize: '11px', color: '#64748B' }}>
-                      {tokenCount} tokens • {elapsedTime}s
-                    </span>
-                    <button
-                      onClick={handleCopy}
+
+                  <div style={{ display: 'flex', gap: '10px', maxWidth: '85%' }}>
+                    {msg.sender === 'ai' && (
+                      <div
+                        style={{
+                          width: '32px',
+                          height: '32px',
+                          borderRadius: '8px',
+                          background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: '#FFFFFF',
+                          flexShrink: 0,
+                          marginTop: '2px',
+                        }}
+                      >
+                        <Sparkles size={16} />
+                      </div>
+                    )}
+
+                    <div
                       style={{
-                        background: 'none',
-                        border: '1px solid #334155',
-                        borderRadius: '4px',
-                        padding: '3px 8px',
-                        fontSize: '11px',
-                        color: copied ? '#34D399' : '#94A3B8',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '4px',
+                        background: msg.sender === 'student' ? '#6366F1' : '#1E293B',
+                        color: '#F8FAFC',
+                        padding: '14px 18px',
+                        borderRadius: msg.sender === 'student' ? '14px 14px 2px 14px' : '2px 14px 14px 14px',
+                        border: msg.sender === 'student' ? 'none' : '1px solid #334155',
+                        fontSize: '14px',
+                        lineHeight: 1.6,
                       }}
                     >
-                      {copied ? <Check size={11} /> : <Copy size={11} />}
-                      {copied ? 'Copied' : 'Copy'}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
 
-            {/* Error Message if any */}
-            {errorMsg && (
-              <div style={{ padding: '12px 14px', borderRadius: '8px', backgroundColor: 'rgba(239, 68, 68, 0.15)', border: '1px solid rgba(239, 68, 68, 0.3)', color: '#F87171', fontSize: '12.5px', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <AlertCircle size={16} style={{ flexShrink: 0 }} />
-                <span>{errorMsg}</span>
-              </div>
-            )}
+                      {/* Source Citations Badges */}
+                      {msg.sources && msg.sources.length > 0 && (
+                        <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid #334155' }}>
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: '#94A3B8', display: 'block', marginBottom: '6px' }}>
+                            Sources ({msg.sources.length}):
+                          </span>
+                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                            {msg.sources.map((s, idx) => (
+                              <button
+                                key={idx}
+                                onClick={() => setActiveSelectedChunk(s)}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: '4px',
+                                  background: 'rgba(99, 102, 241, 0.15)',
+                                  border: '1px solid rgba(99, 102, 241, 0.3)',
+                                  padding: '3px 8px',
+                                  borderRadius: '5px',
+                                  fontSize: '11px',
+                                  color: '#C7D2FE',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                <FileText size={11} /> {s.source} (p. {s.page})
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
-            {/* Markdown Answer or Placeholder */}
-            {!streamedAnswer && !isStreaming ? (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#64748B' }}>
-                <BookOpen size={36} style={{ opacity: 0.3, marginBottom: '12px' }} />
-                <div style={{ fontSize: '14px', fontWeight: 500, color: '#94A3B8' }}>
-                  Ready to answer your queries
-                </div>
-                <div style={{ fontSize: '12px', marginTop: '4px' }}>
-                  Ask any question about documents in Tenant [{selectedTenant.toUpperCase()}]
-                </div>
-              </div>
-            ) : (
-              <div style={{ fontSize: '13.5px', lineHeight: '1.65', color: '#E2E8F0' }} className="markdown-content">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamedAnswer}</ReactMarkdown>
-              </div>
-            )}
-          </div>
-        </main>
-
-        {/* RIGHT COLUMN: RETRIEVED CHUNKS & RERANKER */}
-        <aside style={{ backgroundColor: '#0F172A', borderLeft: '1px solid #1E293B', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-
-          {/* Header */}
-          <div style={{ padding: '14px 16px', borderBottom: '1px solid #1E293B', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <Award size={15} color="#10B981" />
-              <span style={{ fontSize: '13px', fontWeight: 700, color: '#F1F5F9' }}>
-                Reranker & Retrieved
-              </span>
-            </div>
-            <span style={{ fontSize: '11px', color: '#64748B' }}>
-              {rerankedChunks.length || retrievedChunks.length} chunks
-            </span>
-          </div>
-
-          {/* Chunks List */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-            {(rerankedChunks.length > 0 ? rerankedChunks : retrievedChunks).length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '40px 12px', color: '#64748B' }}>
-                <Hash size={30} style={{ margin: '0 auto 10px', opacity: 0.3 }} />
-                <div style={{ fontSize: '12.5px', color: '#94A3B8' }}>No chunks retrieved yet</div>
-                <div style={{ fontSize: '11px', marginTop: '4px' }}>
-                  Submit a query to view semantic chunks from Weaviate
-                </div>
-              </div>
-            ) : (
-              (rerankedChunks.length > 0 ? rerankedChunks : retrievedChunks).map((chunk, idx) => {
-                const score = (chunk as RerankedChunk).relevance_score;
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      padding: '10px 12px',
-                      borderRadius: '8px',
-                      backgroundColor: '#1E293B',
-                      border: '1px solid #334155',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '6px',
-                    }}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span style={{ fontSize: '11px', fontWeight: 600, color: '#38BDF8', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <FileText size={11} />
-                        {chunk.source}
-                      </span>
-                      <span style={{ fontSize: '10px', color: '#94A3B8', backgroundColor: '#0F172A', padding: '1px 5px', borderRadius: '4px' }}>
-                        Page {chunk.page}
-                      </span>
-                    </div>
-
-                    <div style={{ fontSize: '11.5px', color: '#CBD5E1', lineHeight: '1.45', maxHeight: '110px', overflowY: 'auto' }}>
-                      {chunk.content}
-                    </div>
-
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '2px', borderTop: '1px solid #273549', paddingTop: '4px' }}>
-                      <span style={{ fontSize: '10px', color: '#64748B' }}>
-                        Tenant: <strong>{chunk.tenant || selectedTenant}</strong>
-                      </span>
-                      {score !== undefined && (
-                        <span style={{ fontSize: '10px', color: score >= 7 ? '#34D399' : '#FBBF24', fontWeight: 600 }}>
-                          Score: {score}/10
-                        </span>
+                      {/* Copy Button */}
+                      {msg.sender === 'ai' && (
+                        <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'flex-end' }}>
+                          <button
+                            onClick={() => copyToClipboard(msg.text, msg.id)}
+                            style={{
+                              background: 'transparent',
+                              border: 'none',
+                              color: '#64748B',
+                              cursor: 'pointer',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                              fontSize: '11px',
+                            }}
+                          >
+                            {copiedId === msg.id ? <Check size={12} style={{ color: '#10B981' }} /> : <Copy size={12} />}
+                            {copiedId === msg.id ? 'Copied' : 'Copy'}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
-                );
-              })
+                </div>
+              ))}
+
+              {/* Streaming / Loading Indicator */}
+              {isAsking && (
+                <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                  <div
+                    style={{
+                      width: '32px',
+                      height: '32px',
+                      borderRadius: '8px',
+                      background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      color: '#FFFFFF',
+                    }}
+                  >
+                    <RefreshCw size={16} className="animate-spin" />
+                  </div>
+                  <div style={{ background: '#1E293B', padding: '12px 16px', borderRadius: '10px', border: '1px solid #334155' }}>
+                    <span style={{ fontSize: '13px', color: '#94A3B8' }}>Searching Weaviate shard and synthesizing response...</span>
+                  </div>
+                </div>
+              )}
+              <div ref={chatBottomRef} />
+            </div>
+          </div>
+
+          {/* Bottom Chat Input Bar */}
+          <div style={{ padding: '16px 32px', borderTop: '1px solid #1E293B', background: '#0F172A' }}>
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '10px',
+                background: '#1E293B',
+                borderRadius: '12px',
+                border: '1px solid #334155',
+                padding: '6px 12px',
+              }}
+            >
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                title="Attach Note or Image (OCR)"
+                style={{ background: 'transparent', border: 'none', color: '#94A3B8', cursor: 'pointer', padding: '6px' }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = '#FFFFFF')}
+                onMouseLeave={(e) => (e.currentTarget.style.color = '#94A3B8')}
+              >
+                <Paperclip size={18} />
+              </button>
+
+              <input
+                type="text"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleAsk()}
+                placeholder="Ask a question about your uploaded notes or photos... (Press Enter)"
+                style={{
+                  flex: 1,
+                  background: 'transparent',
+                  border: 'none',
+                  outline: 'none',
+                  color: '#F8FAFC',
+                  fontSize: '14px',
+                }}
+              />
+
+              <button
+                onClick={() => handleAsk()}
+                disabled={!question.trim() || isAsking}
+                style={{
+                  background: question.trim() ? '#6366F1' : '#334155',
+                  color: '#FFFFFF',
+                  border: 'none',
+                  padding: '8px 14px',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  fontSize: '13px',
+                  cursor: question.trim() ? 'pointer' : 'not-allowed',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  transition: 'all 0.15s',
+                }}
+              >
+                <Send size={15} /> Ask
+              </button>
+            </div>
+          </div>
+        </main>
+
+        {/* ==========================================
+            RIGHT PANEL: Document & OCR Inspector
+        ========================================== */}
+        <aside
+          style={{
+            width: '320px',
+            borderLeft: '1px solid #1E293B',
+            background: '#0F172A',
+            display: 'flex',
+            flexDirection: 'column',
+            flexShrink: 0,
+            padding: '16px',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px' }}>
+            <Layers size={17} style={{ color: '#818CF8' }} />
+            <h3 style={{ fontSize: '13px', fontWeight: 700, color: '#F8FAFC', margin: 0, textTransform: 'uppercase', letterSpacing: '0.4px' }}>
+              Study Context & Preview
+            </h3>
+          </div>
+
+          {/* Active Retrieved Chunk Preview */}
+          <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {activeSelectedChunk ? (
+              <div
+                style={{
+                  background: '#1E293B',
+                  border: '1px solid #334155',
+                  borderRadius: '10px',
+                  padding: '14px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ fontSize: '12px', fontWeight: 600, color: '#F8FAFC', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {activeSelectedChunk.source}
+                  </span>
+                  <span style={{ fontSize: '11px', background: '#334155', padding: '2px 6px', borderRadius: '4px', color: '#94A3B8' }}>
+                    Page {activeSelectedChunk.page}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    fontSize: '12px',
+                    color: '#CBD5E1',
+                    lineHeight: 1.6,
+                    background: '#0F172A',
+                    padding: '10px',
+                    borderRadius: '6px',
+                    maxHeight: '260px',
+                    overflowY: 'auto',
+                    whiteSpace: 'pre-wrap',
+                  }}
+                >
+                  {activeSelectedChunk.content}
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: '20px 10px', textAlign: 'center', color: '#64748B', fontSize: '12px' }}>
+                <BookOpen size={24} style={{ opacity: 0.3, marginBottom: '6px' }} />
+                <p>When you ask a question, the retrieved chunk from your notes will appear here.</p>
+              </div>
             )}
+
+            {/* OCR + RAG Live Pipeline Card */}
+            <div
+              style={{
+                marginTop: 'auto',
+                background: 'rgba(30, 41, 59, 0.7)',
+                border: '1px solid #334155',
+                borderRadius: '10px',
+                padding: '14px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#F8FAFC', fontSize: '12px', fontWeight: 600, marginBottom: '10px' }}>
+                <Zap size={14} style={{ color: '#F59E0B' }} />
+                OCR + RAG Pipeline Status
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '11px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10B981' }}>
+                  <CheckCircle2 size={13} />
+                  <span>PaddleOCR: Image & Scan Extraction</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10B981' }}>
+                  <CheckCircle2 size={13} />
+                  <span>Weaviate: Isolated Tenant Shard</span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#10B981' }}>
+                  <CheckCircle2 size={13} />
+                  <span>Gemini: Citations & Answer Synthesis</span>
+                </div>
+              </div>
+            </div>
           </div>
         </aside>
       </div>
-
-      {/* ========================================================= */}
-      {/* MODAL 1: UPDATE DOCUMENT                                 */}
-      {/* ========================================================= */}
-      {activeModal === 'update' && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div style={{ width: '440px', backgroundColor: '#1E293B', borderRadius: '12px', border: '1px solid #334155', padding: '24px', boxShadow: '0 20px 40px rgba(0, 0, 0, 0.6)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <RefreshCw size={18} color="#F59E0B" />
-                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#F8FAFC' }}>Update Document</h3>
-              </div>
-              <button
-                onClick={() => setActiveModal(null)}
-                style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p style={{ fontSize: '12.5px', color: '#94A3B8', marginTop: 0, marginBottom: '16px', lineHeight: '1.4' }}>
-              Select an existing document belonging to Tenant [<strong>{selectedTenant.toUpperCase()}</strong>] and replace it with a new PDF, DOCX, or DOC file.
-            </p>
-
-            {/* Document Selection */}
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ fontSize: '11.5px', color: '#64748B', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                Document to Replace
-              </label>
-              <select
-                value={selectedDocForAction?.doc_id || ''}
-                onChange={(e) => {
-                  const found = documents.find((d) => d.doc_id === e.target.value);
-                  if (found) setSelectedDocForAction(found);
-                }}
-                style={{
-                  width: '100%',
-                  padding: '8px 10px',
-                  borderRadius: '6px',
-                  backgroundColor: '#0F172A',
-                  color: '#F1F5F9',
-                  border: '1px solid #334155',
-                  fontSize: '12.5px',
-                  outline: 'none',
-                }}
-              >
-                {documents.map((d) => (
-                  <option key={d.doc_id} value={d.doc_id}>
-                    {d.filename} (v{d.version} • {d.chunk_count} chunks)
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={() => setActiveModal(null)}
-                style={{
-                  padding: '8px 14px',
-                  borderRadius: '6px',
-                  border: '1px solid #334155',
-                  backgroundColor: '#0F172A',
-                  color: '#94A3B8',
-                  fontSize: '12.5px',
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => updateFileInputRef.current?.click()}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: '6px',
-                  border: 'none',
-                  backgroundColor: '#0284C7',
-                  color: '#FFFFFF',
-                  fontSize: '12.5px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <UploadCloud size={14} />
-                <span>Select New File & Update</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================= */}
-      {/* MODAL 2: DELETE DOCUMENT CONFIRMATION                    */}
-      {/* ========================================================= */}
-      {activeModal === 'delete' && selectedDocForAction && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div style={{ width: '420px', backgroundColor: '#1E293B', borderRadius: '12px', border: '1px solid #334155', padding: '24px', boxShadow: '0 20px 40px rgba(0, 0, 0, 0.6)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '14px' }}>
-              <div style={{ width: '36px', height: '36px', borderRadius: '8px', backgroundColor: 'rgba(239, 68, 68, 0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <Trash2 size={20} color="#EF4444" />
-              </div>
-              <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#F8FAFC' }}>
-                Delete Document?
-              </h3>
-            </div>
-
-            <p style={{ fontSize: '12.5px', color: '#94A3B8', marginTop: 0, marginBottom: '14px', lineHeight: '1.45' }}>
-              Are you sure you want to permanently delete{' '}
-              <strong style={{ color: '#F1F5F9' }}>"{selectedDocForAction.filename}"</strong> from Tenant [<strong>{selectedTenant.toUpperCase()}</strong>]?
-            </p>
-
-            <div style={{ padding: '10px 12px', borderRadius: '6px', backgroundColor: 'rgba(239, 68, 68, 0.08)', border: '1px solid rgba(239, 68, 68, 0.2)', marginBottom: '18px', fontSize: '11.5px', color: '#FCA5A5' }}>
-              This will permanently delete the source file and remove all {selectedDocForAction.chunk_count} vector chunks from Weaviate. This action cannot be undone.
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={() => setActiveModal(null)}
-                style={{
-                  padding: '8px 14px',
-                  borderRadius: '6px',
-                  border: '1px solid #334155',
-                  backgroundColor: '#0F172A',
-                  color: '#94A3B8',
-                  fontSize: '12.5px',
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => handleDeleteDocument(selectedDocForAction.doc_id)}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: '6px',
-                  border: 'none',
-                  backgroundColor: '#DC2626',
-                  color: '#FFFFFF',
-                  fontSize: '12.5px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <Trash2 size={14} />
-                <span>Delete Permanently</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ========================================================= */}
-      {/* MODAL 3: INGEST DOCUMENT SELECTOR                        */}
-      {/* ========================================================= */}
-      {activeModal === 'ingest' && (
-        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(3px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 }}>
-          <div style={{ width: '440px', backgroundColor: '#1E293B', borderRadius: '12px', border: '1px solid #334155', padding: '24px', boxShadow: '0 20px 40px rgba(0, 0, 0, 0.6)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Zap size={18} color="#10B981" />
-                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#F8FAFC' }}>Ingest Document</h3>
-              </div>
-              <button
-                onClick={() => setActiveModal(null)}
-                style={{ background: 'none', border: 'none', color: '#94A3B8', cursor: 'pointer' }}
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <p style={{ fontSize: '12.5px', color: '#94A3B8', marginTop: 0, marginBottom: '16px', lineHeight: '1.4' }}>
-              Select an uploaded document to extract text, generate vector embeddings, and index into Tenant [<strong>{selectedTenant.toUpperCase()}</strong>]'s Weaviate shard.
-            </p>
-
-            <div style={{ marginBottom: '16px' }}>
-              <label style={{ fontSize: '11.5px', color: '#64748B', fontWeight: 600, display: 'block', marginBottom: '6px' }}>
-                Select Document
-              </label>
-              <select
-                value={selectedDocForAction?.doc_id || ''}
-                onChange={(e) => {
-                  const found = documents.find((d) => d.doc_id === e.target.value);
-                  if (found) setSelectedDocForAction(found);
-                }}
-                style={{
-                  width: '100%',
-                  padding: '8px 10px',
-                  borderRadius: '6px',
-                  backgroundColor: '#0F172A',
-                  color: '#F1F5F9',
-                  border: '1px solid #334155',
-                  fontSize: '12.5px',
-                  outline: 'none',
-                }}
-              >
-                {documents.map((d) => (
-                  <option key={d.doc_id} value={d.doc_id}>
-                    {d.filename} ({d.status === 'completed' ? `${d.chunk_count} chunks indexed` : d.status})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
-              <button
-                onClick={() => setActiveModal(null)}
-                style={{
-                  padding: '8px 14px',
-                  borderRadius: '6px',
-                  border: '1px solid #334155',
-                  backgroundColor: '#0F172A',
-                  color: '#94A3B8',
-                  fontSize: '12.5px',
-                  cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => selectedDocForAction && handleIngestDocument(selectedDocForAction.doc_id)}
-                disabled={!selectedDocForAction}
-                style={{
-                  padding: '8px 16px',
-                  borderRadius: '6px',
-                  border: 'none',
-                  backgroundColor: '#10B981',
-                  color: '#FFFFFF',
-                  fontSize: '12.5px',
-                  fontWeight: 600,
-                  cursor: !selectedDocForAction ? 'not-allowed' : 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <Zap size={14} />
-                <span>Start Ingestion</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Auth Modal if triggered */}
-      {authModalOpen && <AuthModal isOpen={authModalOpen} onClose={() => setAuthModalOpen(false)} />}
     </div>
   );
 }

@@ -5,7 +5,7 @@ import docx
 
 
 def load_document(file_path: Path | str) -> list[dict]:
-    """Loads and extracts text from PDF, DOCX, and DOC documents.
+    """Loads and extracts text from PDF, DOCX, DOC, and Image documents (with OCR).
     Returns a list of dicts: [{"page": int, "text": str}]
     """
     path = Path(file_path)
@@ -20,8 +20,23 @@ def load_document(file_path: Path | str) -> list[dict]:
         return _load_docx(path)
     elif ext == ".doc":
         return _load_doc(path)
+    elif ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif"}:
+        return _load_image(path)
     else:
-        raise ValueError(f"Unsupported file format '{ext}'. Supported formats: PDF, DOCX, DOC.")
+        raise ValueError(f"Unsupported file format '{ext}'. Supported formats: PDF, DOCX, DOC, PNG, JPG, JPEG, WEBP.")
+
+
+def _load_image(image_path: Path) -> list[dict]:
+    """Runs PaddleOCR on image file and returns page dict."""
+    try:
+        from app.services.ocr_service import ocr_image
+        lines = ocr_image(image_path)
+        text = "\n".join(l["text"] for l in lines)
+        if not text.strip():
+            raise ValueError(f"No text detected in image '{image_path.name}'.")
+        return [{"page": 1, "text": text.strip()}]
+    except Exception as e:
+        raise ValueError(f"OCR failed for image '{image_path.name}': {e}") from e
 
 
 def _load_pdf(pdf_path: Path) -> list[dict]:
@@ -31,8 +46,18 @@ def _load_pdf(pdf_path: Path) -> list[dict]:
             text = page.get_text()
             if text and text.strip():
                 pages.append({"page": page_number, "text": text.strip()})
+    
+    # If no selectable digital text found, run PaddleOCR on scanned PDF pages
     if not pages:
-        raise ValueError("No readable text found in PDF document.")
+        try:
+            from app.services.ocr_service import ocr_pdf
+            ocr_pages = ocr_pdf(pdf_path)
+            pages = [{"page": p["page"], "text": p["text"]} for p in ocr_pages if p.get("text", "").strip()]
+        except Exception as ocr_err:
+            print(f"[OCR] Fallback error on PDF {pdf_path.name}: {ocr_err}")
+
+    if not pages:
+        raise ValueError("No readable text found in PDF document (digital or OCR).")
     return pages
 
 

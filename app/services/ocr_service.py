@@ -259,3 +259,4 @@ if __name__ == "__main__":
     print("PaddleOCR Service Loaded Successfully.")
     print("Supported Image Extensions:", sorted(list(IMAGE_EXTENSIONS)))
     print("Supported Document Extensions:", sorted(list(PDF_EXTENSIONS)))
+
