@@ -41,13 +41,25 @@ def ensure_collection(client):
             ],
         )
     collection = client.collections.get(COLLECTION_NAME)
-    # Ensure doc_id property exists if collection was created earlier
+    # Ensure all required schema properties exist
     try:
-        props = [p.name for p in collection.config.get().properties]
-        if "doc_id" not in props:
-            collection.config.add_property(Property(name="doc_id", data_type=DataType.TEXT))
-    except Exception:
-        pass
+        existing_props = {p.name for p in collection.config.get().properties}
+        required_props = [
+            Property(name="content", data_type=DataType.TEXT),
+            Property(name="source", data_type=DataType.TEXT),
+            Property(name="page", data_type=DataType.INT),
+            Property(name="chunk_index", data_type=DataType.INT),
+            Property(name="doc_id", data_type=DataType.TEXT),
+        ]
+        for prop in required_props:
+            if prop.name not in existing_props:
+                try:
+                    collection.config.add_property(prop)
+                    print(f"[Weaviate] Added missing property '{prop.name}' to schema.")
+                except Exception as pe:
+                    print(f"[Weaviate] Error adding property '{prop.name}': {pe}")
+    except Exception as e:
+        print(f"[Weaviate] Error checking schema properties: {e}")
     return collection
 
 

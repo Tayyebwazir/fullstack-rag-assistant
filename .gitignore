@@ -24,6 +24,7 @@ __pycache__/
 env/
 venv/
 .venv/
+.venv-ocr/
 ENV/
 build/
 develop-eggs/

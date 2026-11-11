@@ -29,6 +29,9 @@ import {
   ChevronRight,
   ExternalLink,
   Lock,
+  Printer,
+  Eye,
+  X,
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -97,6 +100,16 @@ export default function App() {
   const [uploadLoading, setUploadLoading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [selectedSourceFilter, setSelectedSourceFilter] = useState<string>('all');
+
+  // Extracted Text Inspector Modal & Print
+  const [extractedTextModal, setExtractedTextModal] = useState<{
+    isOpen: boolean;
+    filename: string;
+    text: string;
+    loading?: boolean;
+  }>({ isOpen: false, filename: '', text: '' });
+  const [lastExtractedDoc, setLastExtractedDoc] = useState<{ filename: string; text: string } | null>(null);
+  const [copiedExtracted, setCopiedExtracted] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatBottomRef = useRef<HTMLDivElement>(null);
@@ -208,8 +221,18 @@ export default function App() {
       }
 
       setUploadStatus(`✓ Ready! Ingested ${ingestData.chunks_ingested} chunks.`);
+      if (ingestData.extracted_text) {
+        const docInfo = { filename: file.name, text: ingestData.extracted_text };
+        setLastExtractedDoc(docInfo);
+        setExtractedTextModal({
+          isOpen: true,
+          filename: file.name,
+          text: ingestData.extracted_text,
+          loading: false,
+        });
+      }
       await fetchTenantDocuments();
-      setTimeout(() => setUploadStatus(null), 3500);
+      setTimeout(() => setUploadStatus(null), 4000);
     } catch (err: any) {
       setUploadStatus(`❌ ${err.message || 'Error processing file'}`);
       setTimeout(() => setUploadStatus(null), 5000);
@@ -217,6 +240,116 @@ export default function App() {
       setUploadLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
+  };
+
+  // Fetch and Show Extracted Text on Demand
+  const handleFetchAndShowExtractedText = async (docId: string, filename: string) => {
+    if (!currentUser) return;
+    setExtractedTextModal({ isOpen: true, filename, text: '', loading: true });
+    try {
+      const token = await currentUser.getIdToken();
+      const res = await fetch(`${API_BASE}/documents/${docId}/extracted-text`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (res.ok && data.extracted_text) {
+        setExtractedTextModal({ isOpen: true, filename, text: data.extracted_text, loading: false });
+        setLastExtractedDoc({ filename, text: data.extracted_text });
+      } else {
+        setExtractedTextModal({
+          isOpen: true,
+          filename,
+          text: data.detail || 'No text could be extracted from this document.',
+          loading: false,
+        });
+      }
+    } catch (err: any) {
+      setExtractedTextModal({
+        isOpen: true,
+        filename,
+        text: `Error fetching extracted text: ${err.message}`,
+        loading: false,
+      });
+    }
+  };
+
+  // Print Extracted Text in Clean Printable Window
+  const handlePrintText = (filename: string, text: string) => {
+    if (!text) return;
+    const printWindow = window.open('', '_blank', 'width=800,height=900');
+    if (!printWindow) {
+      window.print();
+      return;
+    }
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    printWindow.document.write(`<!DOCTYPE html>
+<html>
+  <head>
+    <title>Extracted Text - ${filename}</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace, sans-serif;
+        padding: 40px;
+        color: #111827;
+        background: #FFFFFF;
+        line-height: 1.6;
+        font-size: 14px;
+      }
+      .header {
+        border-bottom: 2px solid #E5E7EB;
+        padding-bottom: 16px;
+        margin-bottom: 24px;
+      }
+      .title { font-size: 20px; font-weight: 700; color: #1F2937; margin: 0 0 8px 0; }
+      .meta { display: flex; gap: 10px; align-items: center; }
+      .badge {
+        display: inline-block;
+        background: #EEF2FF;
+        color: #4F46E5;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+      }
+      .content {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background: #F9FAFB;
+        border: 1px solid #E5E7EB;
+        border-radius: 8px;
+        padding: 24px;
+        font-family: inherit;
+        font-size: 13.5px;
+      }
+      @media print {
+        body { padding: 0; }
+        .content { border: none; background: transparent; padding: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <h1 class="title">${filename}</h1>
+      <div class="meta">
+        <span class="badge">Paddle PP-OCRv5 Extraction</span>
+      </div>
+    </div>
+    <div class="content">${escaped}</div>
+  </body>
+</html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+    }, 400);
+  };
+
+  // Copy Extracted Text
+  const handleCopyExtractedText = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedExtracted(true);
+    setTimeout(() => setCopiedExtracted(false), 2000);
   };
 
   // Delete Document
@@ -585,15 +718,44 @@ export default function App() {
                         </span>
                       </div>
                     </div>
-                    <button
-                      onClick={() => handleDeleteDocument(doc.doc_id, doc.filename)}
-                      title="Delete Note"
-                      style={{ background: 'transparent', border: 'none', color: '#64748B', cursor: 'pointer', padding: '4px' }}
-                      onMouseEnter={(e) => (e.currentTarget.style.color = '#EF4444')}
-                      onMouseLeave={(e) => (e.currentTarget.style.color = '#64748B')}
-                    >
-                      <Trash2 size={13} />
-                    </button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                      <button
+                        onClick={() => handleFetchAndShowExtractedText(doc.doc_id, doc.filename)}
+                        title="Print / View Extracted Text"
+                        style={{
+                          background: 'rgba(99, 102, 241, 0.12)',
+                          border: '1px solid rgba(99, 102, 241, 0.3)',
+                          borderRadius: '5px',
+                          color: '#A5B4FC',
+                          cursor: 'pointer',
+                          padding: '3px 6px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '3px',
+                          fontSize: '10px',
+                          fontWeight: 600,
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = 'rgba(99, 102, 241, 0.3)';
+                          e.currentTarget.style.color = '#FFFFFF';
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = 'rgba(99, 102, 241, 0.12)';
+                          e.currentTarget.style.color = '#A5B4FC';
+                        }}
+                      >
+                        <Eye size={11} /> OCR
+                      </button>
+                      <button
+                        onClick={() => handleDeleteDocument(doc.doc_id, doc.filename)}
+                        title="Delete Note"
+                        style={{ background: 'transparent', border: 'none', color: '#64748B', cursor: 'pointer', padding: '4px' }}
+                        onMouseEnter={(e) => (e.currentTarget.style.color = '#EF4444')}
+                        onMouseLeave={(e) => (e.currentTarget.style.color = '#64748B')}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   </div>
                 );
               })
@@ -654,6 +816,27 @@ export default function App() {
                   </p>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  {lastExtractedDoc && (
+                    <button
+                      onClick={() => handlePrintText(lastExtractedDoc.filename, lastExtractedDoc.text)}
+                      title="Print extracted text from uploaded notes"
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        background: 'rgba(16, 185, 129, 0.15)',
+                        border: '1px solid #10B981',
+                        color: '#6EE7B7',
+                        padding: '9px 14px',
+                        borderRadius: '9px',
+                        fontWeight: 600,
+                        fontSize: '12px',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      <Printer size={15} /> Print Extracted Text
+                    </button>
+                  )}
                   <button
                     onClick={() => fileInputRef.current?.click()}
                     disabled={uploadLoading}
@@ -690,11 +873,54 @@ export default function App() {
                     color: uploadStatus.startsWith('❌') ? '#FCA5A5' : '#6EE7B7',
                     display: 'flex',
                     alignItems: 'center',
+                    justifyContent: 'space-between',
                     gap: '6px',
                   }}
                 >
-                  {uploadLoading && <RefreshCw size={13} className="animate-spin" />}
-                  {uploadStatus}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    {uploadLoading && <RefreshCw size={13} className="animate-spin" />}
+                    <span>{uploadStatus}</span>
+                  </div>
+                  {lastExtractedDoc && !uploadLoading && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <button
+                        onClick={() => setExtractedTextModal({ isOpen: true, filename: lastExtractedDoc.filename, text: lastExtractedDoc.text })}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.15)',
+                          border: 'none',
+                          borderRadius: '6px',
+                          color: '#FFFFFF',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <Eye size={12} /> View Text
+                      </button>
+                      <button
+                        onClick={() => handlePrintText(lastExtractedDoc.filename, lastExtractedDoc.text)}
+                        style={{
+                          background: '#10B981',
+                          border: 'none',
+                          borderRadius: '6px',
+                          color: '#FFFFFF',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          padding: '4px 8px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '4px',
+                        }}
+                      >
+                        <Printer size={12} /> Print Text
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -1083,6 +1309,164 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {/* ==========================================
+          EXTRACTED TEXT & PRINT INSPECTION MODAL
+      ========================================== */}
+      {extractedTextModal.isOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+            padding: '20px',
+          }}
+          onClick={() => setExtractedTextModal({ isOpen: false, filename: '', text: '' })}
+        >
+          <div
+            style={{
+              background: '#0F172A',
+              border: '1px solid #334155',
+              borderRadius: '16px',
+              width: '100%',
+              maxWidth: '750px',
+              maxHeight: '85vh',
+              display: 'flex',
+              flexDirection: 'column',
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)',
+              overflow: 'hidden',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '16px 20px',
+                borderBottom: '1px solid #1E293B',
+                background: '#1E293B',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <FileText size={18} style={{ color: '#818CF8' }} />
+                <div>
+                  <h3 style={{ fontSize: '15px', fontWeight: 700, color: '#F8FAFC', margin: 0 }}>
+                    Extracted Text Preview
+                  </h3>
+                  <span style={{ fontSize: '12px', color: '#94A3B8' }}>{extractedTextModal.filename}</span>
+                </div>
+                <span
+                  style={{
+                    background: 'rgba(99, 102, 241, 0.15)',
+                    color: '#A5B4FC',
+                    border: '1px solid rgba(99, 102, 241, 0.3)',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    padding: '2px 8px',
+                    borderRadius: '6px',
+                  }}
+                >
+                  PP-OCRv5
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={() => handleCopyExtractedText(extractedTextModal.text)}
+                  disabled={!extractedTextModal.text || extractedTextModal.loading}
+                  style={{
+                    background: '#334155',
+                    border: 'none',
+                    color: copiedExtracted ? '#10B981' : '#F8FAFC',
+                    padding: '6px 12px',
+                    borderRadius: '7px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  {copiedExtracted ? <Check size={14} /> : <Copy size={14} />}
+                  {copiedExtracted ? 'Copied' : 'Copy'}
+                </button>
+
+                <button
+                  onClick={() => handlePrintText(extractedTextModal.filename, extractedTextModal.text)}
+                  disabled={!extractedTextModal.text || extractedTextModal.loading}
+                  style={{
+                    background: '#10B981',
+                    border: 'none',
+                    color: '#FFFFFF',
+                    padding: '6px 14px',
+                    borderRadius: '7px',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                  }}
+                >
+                  <Printer size={14} /> Print Text
+                </button>
+
+                <button
+                  onClick={() => setExtractedTextModal({ isOpen: false, filename: '', text: '' })}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: '#94A3B8',
+                    cursor: 'pointer',
+                    padding: '6px',
+                    borderRadius: '6px',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.color = '#FFFFFF')}
+                  onMouseLeave={(e) => (e.currentTarget.style.color = '#94A3B8')}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div style={{ flex: 1, padding: '20px', overflowY: 'auto' }}>
+              {extractedTextModal.loading ? (
+                <div style={{ padding: '40px', textAlign: 'center', color: '#94A3B8', fontSize: '13px' }}>
+                  <RefreshCw size={24} className="animate-spin" style={{ margin: '0 auto 12px', color: '#818CF8' }} />
+                  <p>Running Paddle PP-OCRv5 extraction on note...</p>
+                </div>
+              ) : (
+                <pre
+                  style={{
+                    background: '#030712',
+                    border: '1px solid #1F2937',
+                    borderRadius: '10px',
+                    padding: '16px',
+                    color: '#E2E8F0',
+                    fontSize: '13px',
+                    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                    lineHeight: 1.65,
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    margin: 0,
+                  }}
+                >
+                  {extractedTextModal.text || 'No text detected in this document.'}
+                </pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
