@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from google import genai
 
-from app.config import GEMINI_API_KEY, GENERATION_MODEL, TOP_K
+from app.config import GEMINI_API_KEY, GENERATION_MODEL, RERANK_TOP_K, RETRIEVAL_TOP_K
 from app.dependencies import require_tenant_permission, resolve_authorized_user
 from app.schemas import QuestionRequest
 from app.services.auth import get_current_user
@@ -96,9 +96,13 @@ Remind the user briefly that they can ask questions about documents in their aut
                 query_vector=q_vec,
                 tenant_id=authorized_tenant,
                 source_filter=request.source_filter,
-                limit=TOP_K,
+                limit=RETRIEVAL_TOP_K,
             )
-            reranked = rerank_chunks(question=request.question, chunks=chunks, top_k=TOP_K)
+            reranked = rerank_chunks(
+                question=request.question,
+                chunks=chunks,
+                top_k=RERANK_TOP_K,
+            )
 
             meta_payload = json.dumps({
                 "type": "metadata",

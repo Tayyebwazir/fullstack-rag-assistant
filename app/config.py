@@ -17,4 +17,6 @@ FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "authen-81a29")
 
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
-TOP_K = int(os.getenv("TOP_K", "5"))
+TOP_K = int(os.getenv("TOP_K", "4"))
+RETRIEVAL_TOP_K = int(os.getenv("RETRIEVAL_TOP_K", "20"))
+RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "4"))
