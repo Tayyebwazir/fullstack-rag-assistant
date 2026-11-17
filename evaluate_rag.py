@@ -129,12 +129,7 @@ def ensure_document_ingested(tenant_id: str, pdf_file: Path) -> int:
 
 
 def run_evaluation(tenant_id: str, top_k: int = TOP_K, use_rerank: bool = False):
-    """Executes retrieval evaluation and prints Hit Rate@1, Hit Rate@K, and MRR."""
-    total = len(EVAL_SET)
-    hits_at_1 = 0
-    hits_at_k = 0
-    reciprocal_ranks = []
-
+    """Executes retrieval evaluation and prints Hit Rank and Precision@K per question."""
     print(f"{'=' * 80}")
     print(f" RAG RETRIEVAL EVALUATION")
     print(f" Tenant: {tenant_id} | Top-K: {top_k} | Reranker: {'ON' if use_rerank else 'OFF'}")
@@ -160,47 +155,25 @@ def run_evaluation(tenant_id: str, top_k: int = TOP_K, use_rerank: bool = False)
 
         retrieved_pages = [c.get("page") for c in chunks]
 
-        # 3. Calculate metrics
+        # 3. Hit rank & status
         hit_k = any(p in expected for p in retrieved_pages)
-        hit_1 = bool(retrieved_pages and retrieved_pages[0] in expected)
-
-        rr = 0.0
         first_hit_rank = "-"
         for rank, p in enumerate(retrieved_pages, start=1):
             if p in expected:
-                rr = 1.0 / rank
                 first_hit_rank = str(rank)
                 break
 
-        if hit_1:
-            hits_at_1 += 1
-        if hit_k:
-            hits_at_k += 1
-        reciprocal_ranks.append(rr)
+        # 4. Precision@K = (Correct retrieved chunks / Total retrieved chunks) * 100
+        correct_chunks = sum(1 for p in retrieved_pages if p in expected)
+        total_chunks = len(retrieved_pages)
+        precision_k = (correct_chunks / total_chunks * 100) if total_chunks > 0 else 0.0
 
-        # 4. Display result per query
+        # 5. Display result per query
         status = "PASS" if hit_k else "FAIL"
         print(f"[{status}] Q{qid:02d}: {q}")
-        print(f"       Expected: {expected} | Retrieved: {retrieved_pages} | Hit Rank: {first_hit_rank}")
+        print(f"       Expected: {expected} | Retrieved: {retrieved_pages} | Hit Rank: {first_hit_rank} | Precision@{top_k}: {precision_k:.1f}% ({correct_chunks}/{total_chunks})")
 
-    # Summary
-    hit_rate_1 = (hits_at_1 / total) * 100
-    hit_rate_k = (hits_at_k / total) * 100
-    mrr = sum(reciprocal_ranks) / total if total > 0 else 0.0
-
-    print(f"\n{'-' * 80}")
-    print(f" EVALUATION SUMMARY ({total} Questions)")
-    print(f"{'-' * 80}")
-    print(f" Hit Rate@1 : {hit_rate_1:6.1f}%  ({hits_at_1}/{total})")
-    print(f" Hit Rate@{top_k} : {hit_rate_k:6.1f}%  ({hits_at_k}/{total})")
-    print(f" MRR        : {mrr:6.3f}")
-    print(f"{'=' * 80}\n")
-
-    return {
-        "hit_rate_at_1": hit_rate_1,
-        "hit_rate_at_k": hit_rate_k,
-        "mrr": mrr,
-    }
+    print(f"\n{'=' * 80}\n")
 
 
 def main():
