@@ -2,11 +2,13 @@ from google import genai
 from app.config import (
     GEMINI_API_KEY,
     GENERATION_MODEL,
-    TOP_K,
+    RERANK_TOP_K,
+    RETRIEVAL_TOP_K,
 )
 from app.services.embeddings import embed_query
 from app.services.vector_store import search_chunks
 from app.services.intent import is_conversational_or_greeting
+from app.services.reranker import rerank_chunks
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -36,7 +38,7 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
         query_vector=query_vector,
         tenant_id=tenant_id,
         source_filter=source_filter,
-        limit=TOP_K,
+        limit=RETRIEVAL_TOP_K,
     )
     if not chunks:
         return {
@@ -44,7 +46,14 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
             "sources": [],
         }
 
-    context_parts = [chunk["content"].strip() for chunk in chunks]
+    reranked = rerank_chunks(
+        question=question,
+        chunks=chunks,
+        top_k=RERANK_TOP_K,
+    )
+    selected_chunks = reranked if reranked else chunks[:RERANK_TOP_K]
+
+    context_parts = [chunk["content"].strip() for chunk in selected_chunks]
     context = "\n\n---\n\n".join(context_parts)
     prompt = f"""You are an expert AI document assistant.
 Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
@@ -74,6 +83,6 @@ Guidelines:
                 "chunk_index": chunk["chunk_index"],
                 "content": chunk["content"],
             }
-            for chunk in chunks
+            for chunk in selected_chunks
         ],
     }

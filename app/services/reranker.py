@@ -1,61 +1,88 @@
-import json
 import logging
-from google import genai
-from google.genai import types
-from app.config import (
-    GEMINI_API_KEY,
-    GENERATION_MODEL,
-    RERANK_TOP_K,
-)
+import requests
+from typing import Any
+from app.config import COHERE_API_KEY, RERANK_MODEL, RERANK_TOP_K
 
 logger = logging.getLogger(__name__)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def rerank_chunks(
     question: str,
-    chunks: list[dict],
+    chunks: list[dict[str, Any]],
     top_k: int = RERANK_TOP_K,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
+    """Reranks candidate chunks using Cohere Rerank API.
+
+    Args:
+        question: User query string.
+        chunks: List of candidate chunks from Weaviate (~20 candidates).
+        top_k: Number of chunks to select after reranking (e.g. 4).
+
+    Returns:
+        Top-k chunks ordered by relevance score descending.
+    """
     if not chunks:
         return []
 
-    items = [f"[{i}] {c.get('content', '')[:600]}" for i, c in enumerate(chunks)]
-    prompt = f"""You are a retrieval reranker. Score each document chunk's relevance to the question from 0.0 to 10.0 (10.0 = exact answer, 0.0 = completely irrelevant).
-Question: {question}
-
-Candidate Chunks:
-{chr(10).join(items)}
-
-Return ONLY a JSON array of objects with integer 'index' and float 'score', e.g.:
-[{{"index": 0, "score": 9.5}}, {{"index": 1, "score": 2.0}}]"""
-
-    score_map = {}
-    try:
-        response = gemini_client.models.generate_content(
-            model=GENERATION_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json"),
+    if not COHERE_API_KEY:
+        logger.warning(
+            "COHERE_API_KEY is missing in .env; skipping rerank and returning top %d chunks from vector search.",
+            top_k,
         )
-        data = json.loads(response.text or "[]")
-        score_map = {int(item["index"]): float(item.get("score", 0.0)) for item in data if "index" in item}
+        return chunks[:top_k]
+
+    try:
+        # 1. Extract chunk texts
+        documents = [c.get("content", "") for c in chunks]
+
+        # 2. Call Cohere Rerank v2 API
+        response = requests.post(
+            "https://api.cohere.com/v2/rerank",
+            headers={
+                "Authorization": f"Bearer {COHERE_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": RERANK_MODEL,
+                "query": question,
+                "documents": documents,
+                "top_n": top_k,
+            },
+            timeout=10,
+        )
+
+        if response.status_code != 200:
+            logger.error("Cohere Rerank API returned status %d: %s", response.status_code, response.text)
+            return chunks[:top_k]
+
+        data = response.json()
+        results = data.get("results", [])
+
+        # 3. Rebuild chunk list with new ranks and scores
+        reranked = []
+        for new_rank, item in enumerate(results, start=1):
+            orig_idx = item["index"]
+            chunk = chunks[orig_idx].copy()
+            chunk["original_rank"] = orig_idx + 1
+            chunk["relevance_score"] = float(item["relevance_score"])
+            chunk["rerank_position"] = new_rank
+            reranked.append(chunk)
+
+        # 4. Log reranking results to server terminal
+        print(f"\n{'=' * 65}")
+        print(f"[Reranker] Query: '{question}'")
+        print(f"[Reranker] Evaluated {len(chunks)} candidates -> Selected Top {len(reranked)}:")
+        for c in reranked:
+            rank = c["rerank_position"]
+            orig = c["original_rank"]
+            score = c["relevance_score"]
+            page = c.get("page", "N/A")
+            preview = c.get("content", "")[:500].replace("\n", " ")
+            print(f"  Rank #{rank} (Was #{orig}) | Score: {score:8.4f} | Page {str(page):2} | {preview}...")
+        print(f"{'=' * 65}\n")
+
+        return reranked
+
     except Exception as exc:
-        logger.error("Gemini reranker failed (%s); keeping vector search order.", exc)
-
-    reranked = [
-        {
-            **chunk,
-            "original_rank": orig + 1,
-            "relevance_score": score_map.get(orig, 0.0),
-        }
-        for orig, chunk in enumerate(chunks)
-    ]
-
-    # Only re-sort if scoring succeeded
-    if score_map:
-        reranked.sort(key=lambda x: x["relevance_score"], reverse=True)
-
-    for new_rank, item in enumerate(reranked, start=1):
-        item["rerank_position"] = new_rank
-
-    return reranked[:top_k] if top_k else reranked
+        logger.error("Cohere Rerank execution failed: %s; keeping vector search order.", exc)
+        return chunks[:top_k]
