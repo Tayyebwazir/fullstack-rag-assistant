@@ -22,6 +22,15 @@ except (ImportError, AttributeError):
         return []
 
 router = APIRouter(tags=["Q&A / RAG"])
+SYSTEM_PROMPT = """You are a helpful student AI assistant.
+
+Rules:
+1. Answer questions ONLY using the provided context.
+2. Do not use outside knowledge.
+3. If the context does not contain the answer, say: "I don't know based on the provided documents."
+4. Always cite the source document and page number.
+5. Do not invent information or citations.
+"""
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -122,24 +131,18 @@ Remind the user briefly that they can ask questions about documents in their aut
                 return
 
             context_blocks = [
-                c["content"].strip()
+                f"[Document: {c.get('source', 'Unknown')} | Page: {c.get('page', 'N/A')}]\n{c.get('content', '').strip()}"
                 for c in (reranked or chunks)
             ]
             context = "\n\n---\n\n".join(context_blocks)
 
-            prompt = f"""You are an expert AI document assistant for tenant [{authorized_tenant}].
-Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
+            prompt = f"""{SYSTEM_PROMPT}
 
 Context:
 {context}
 
 Question:
 {request.question}
-
-Guidelines:
-- Deliver high quality, direct, well-organized explanations formatted with clean Markdown (use headings, bullet points, bold keywords, and code snippets when present).
-- Do NOT output raw citation brackets or source tags (such as "[source:...]", "[page:...]") in your answer text. Document sources and page numbers are already presented in a dedicated visual panel.
-- Explain technical definitions and include code examples if available in the text.
 """
             stream = gemini_client.models.generate_content_stream(
                 model=GENERATION_MODEL,

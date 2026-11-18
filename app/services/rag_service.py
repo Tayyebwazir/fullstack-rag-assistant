@@ -11,7 +11,15 @@ from app.services.intent import is_conversational_or_greeting
 from app.services.reranker import rerank_chunks
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+SYSTEM_PROMPT = """You are a helpful student AI assistant.
 
+Rules:
+1. Answer questions ONLY using the provided context.
+2. Do not use outside knowledge.
+3. If the context does not contain the answer, say: "I don't know based on the provided documents."
+4. Always cite the source document and page number.
+5. Do not invent information or citations.
+"""
 
 def answer_question(
     question: str,
@@ -53,21 +61,19 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
     )
     selected_chunks = reranked if reranked else chunks[:RERANK_TOP_K]
 
-    context_parts = [chunk["content"].strip() for chunk in selected_chunks]
+    context_parts = [
+        f"[Document: {chunk.get('source', 'Unknown')} | Page: {chunk.get('page', 'N/A')}]\n{chunk.get('content', '').strip()}"
+        for chunk in selected_chunks
+    ]
     context = "\n\n---\n\n".join(context_parts)
-    prompt = f"""You are an expert AI document assistant.
-Provide a clear, detailed, comprehensive, and well-structured answer to the user's question based strictly on the provided context.
+
+    prompt = f"""{SYSTEM_PROMPT}
 
 Context:
 {context}
 
 Question:
 {question}
-
-Guidelines:
-- Provide high quality, well-organized explanations with Markdown formatting (use headings, bullet points, bold keywords, and code snippets when present).
-- Do NOT output citation brackets or source tags (such as [source:...], [page:...]) inside your answer text. All document sources and page locations are already presented in a dedicated visual panel.
-- Explain technical definitions and provide code examples if available in the text.
 """
 
     response = gemini_client.models.generate_content(

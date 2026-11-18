@@ -1,13 +1,14 @@
 import uuid
 import weaviate
 from weaviate.classes.config import Configure, Property, DataType
-from weaviate.classes.query import Filter
+from weaviate.classes.query import Filter, MetadataQuery
 from weaviate.classes.tenants import Tenant
 from app.config import (
     COLLECTION_NAME,
     WEAVIATE_MODE,
     WEAVIATE_URL,
     WEAVIATE_API_KEY,
+    DISTANCE_THRESHOLD,
 )
 
 
@@ -196,6 +197,7 @@ def search_chunks(
     tenant_id: str = "default",
     source_filter: str | None = None,
     limit: int = 4,
+    distance_threshold: float = DISTANCE_THRESHOLD,
 ) -> list[dict]:
     with connect_weaviate() as client:
         if not client.collections.exists(COLLECTION_NAME):
@@ -213,15 +215,25 @@ def search_chunks(
             near_vector=query_vector,
             filters=filters,
             limit=limit,
+            return_metadata=MetadataQuery(distance=True, certainty=True),
         )
-        return [
-            {
+
+        filtered_chunks = []
+        for obj in response.objects:
+            dist = getattr(obj.metadata, "distance", None)
+            # Cut off: Reject chunks with distance greater than threshold
+            if dist is not None and dist > distance_threshold:
+                continue
+
+            filtered_chunks.append({
                 "source": obj.properties.get("source", "unknown"),
                 "page": obj.properties.get("page", 1),
                 "chunk_index": obj.properties.get("chunk_index", 0),
                 "content": obj.properties.get("content", ""),
                 "doc_id": obj.properties.get("doc_id", ""),
                 "tenant": target_tenant,
-            }
-            for obj in response.objects
-        ]
+                "distance": dist,
+                "certainty": getattr(obj.metadata, "certainty", None),
+            })
+
+        return filtered_chunks
