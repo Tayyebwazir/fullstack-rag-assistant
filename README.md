@@ -1,6 +1,6 @@
 # Full-Stack Multi-Tenant PDF RAG Assistant
 
-A production-grade, full-stack Retrieval-Augmented Generation (RAG) assistant powered by **FastAPI**, **Weaviate Cloud**, **Google Gemini**, and a modern **React + TypeScript** frontend with **Firebase Authentication**.
+A full-stack multi-tenant Retrieval-Augmented Generation (RAG) assistant application powered by **FastAPI**, **Weaviate Cloud**, **Google Gemini**, and a modern **React + TypeScript** frontend with **Firebase Authentication**.
 
 ---
 
@@ -87,6 +87,15 @@ cd fullstack-rag-assistant
    npm run dev
    ```
    Open `http://localhost:3000` in your browser.
+
+---
+
+## ⚠️ Known Limitations
+
+- **Weaviate Cloud Sandbox Limits**: Free-tier Weaviate Cloud sandboxes restrict the number of active tenants (typically 3 active tenants) and expire after 14 days without an upgraded cluster plan.
+- **Synchronous Ingestion Pipeline**: PDF text extraction, chunking, and embedding generation currently execute synchronously during the ingestion request. Very large files or batch uploads may experience high response latency without an asynchronous task queue (e.g., Celery, RQ, or Cloud Tasks).
+- **Rate Limit Storage**: Ingestion rate limits are persisted using a file-backed JSON store (`rate_limits.json`). For horizontally scaled multi-worker or containerized deployments, a distributed database or memory store (such as Redis or Firestore) is recommended.
+- **In-Memory Query Vector Caching**: Frequently searched query vectors are cached in-process to optimize latency and quota usage, but cache contents reset upon application process restarts.
 
 ---
 

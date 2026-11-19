@@ -1,38 +1,21 @@
 """Question answering and SSE streaming RAG routes with strict tenant isolation."""
 
 import json
-
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from google import genai
 
-from app.config import GEMINI_API_KEY, GENERATION_MODEL, RERANK_TOP_K, RETRIEVAL_TOP_K
+logger = logging.getLogger(__name__)
+
+from app.config import GENERATION_MODEL
 from app.dependencies import require_tenant_permission, resolve_authorized_user
 from app.schemas import QuestionRequest
 from app.services.auth import get_current_user
-from app.services.embeddings import embed_query
+from app.services.gemini_client import get_gemini_client
 from app.services.intent import is_conversational_or_greeting
-from app.services.rag_service import answer_question
-from app.services.vector_store import search_chunks
-
-try:
-    from app.services.reranker import rerank_chunks
-except (ImportError, AttributeError):
-    def rerank_chunks(question="", chunks=None, top_k=None):
-        return []
+from app.services.rag_service import answer_question, get_greeting_prompt, prepare_rag_pipeline
 
 router = APIRouter(tags=["Q&A / RAG"])
-SYSTEM_PROMPT = """You are a helpful student AI assistant.
-
-Rules:
-1. Answer questions ONLY using the provided context.
-2. Do not use outside knowledge.
-3. If the context does not contain the answer, say: "I don't know based on the provided documents."
-4. Always cite the source document and page number.
-5. Do not invent information or citations.
-"""
-
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 
 def _sse_error_response(error_text: str) -> StreamingResponse:
@@ -53,6 +36,12 @@ def ask_question(
 ):
     """Answers a user question strictly within their authorized Weaviate tenant shard."""
     authorized_tenant = auth["tenant_id"]
+    if request.tenant_id and request.tenant_id != authorized_tenant:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access Denied: You are not authorized to access tenant '{request.tenant_id}'.",
+        )
+
     try:
         return answer_question(
             request.question,
@@ -60,7 +49,11 @@ def ask_question(
             source_filter=request.source_filter,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        logger.error("Error answering question: %s", exc, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process question due to an internal error.",
+        ) from exc
 
 
 @router.post("/ask-stream")
@@ -75,18 +68,19 @@ def ask_question_stream(
     if err_msg:
         return _sse_error_response(f"403 Forbidden - {err_msg}")
 
+    if request.tenant_id and request.tenant_id != authorized_tenant:
+        return _sse_error_response(f"403 Forbidden - You are not authorized to access tenant '{request.tenant_id}'.")
+
     def event_generator():
         try:
+            gemini_client = get_gemini_client()
+
             # 1. Check for greetings / non-document general conversation
             if is_conversational_or_greeting(request.question):
                 empty_meta = json.dumps({"type": "metadata", "chunks": [], "reranked": []})
                 yield f"data: {empty_meta}\n\n"
 
-                greeting_prompt = f"""You are a helpful and polite document assistant for tenant [{authorized_tenant}].
-Respond naturally, politely and concisely to the following greeting or general question:
-"{request.question}"
-Remind the user briefly that they can ask questions about documents in their authorized tenant."""
-
+                greeting_prompt = get_greeting_prompt(request.question, tenant_id=authorized_tenant)
                 stream = gemini_client.models.generate_content_stream(
                     model=GENERATION_MODEL,
                     contents=greeting_prompt,
@@ -99,29 +93,22 @@ Remind the user briefly that they can ask questions about documents in their aut
                 yield 'data: {"type": "done"}\n\n'
                 return
 
-            # 2. Document Question: Retrieve chunks strictly within active authorized tenant shard & Rerank
-            q_vec = embed_query(request.question)
-            chunks = search_chunks(
-                query_vector=q_vec,
+            # 2. Document Question: Use shared RAG pipeline
+            pipeline_result = prepare_rag_pipeline(
+                question=request.question,
                 tenant_id=authorized_tenant,
                 source_filter=request.source_filter,
-                limit=RETRIEVAL_TOP_K,
-            )
-            reranked = rerank_chunks(
-                question=request.question,
-                chunks=chunks,
-                top_k=RERANK_TOP_K,
             )
 
             meta_payload = json.dumps({
                 "type": "metadata",
-                "chunks": chunks,
-                "reranked": reranked,
+                "chunks": pipeline_result["chunks"],
+                "reranked": pipeline_result["reranked"],
                 "tenant": authorized_tenant,
             })
             yield f"data: {meta_payload}\n\n"
 
-            if not chunks:
+            if not pipeline_result["has_chunks"]:
                 empty_payload = json.dumps({
                     "type": "token",
                     "token": f"No relevant information found in tenant [{authorized_tenant}].",
@@ -130,23 +117,9 @@ Remind the user briefly that they can ask questions about documents in their aut
                 yield 'data: {"type": "done"}\n\n'
                 return
 
-            context_blocks = [
-                f"[Document: {c.get('source', 'Unknown')} | Page: {c.get('page', 'N/A')}]\n{c.get('content', '').strip()}"
-                for c in (reranked or chunks)
-            ]
-            context = "\n\n---\n\n".join(context_blocks)
-
-            prompt = f"""{SYSTEM_PROMPT}
-
-Context:
-{context}
-
-Question:
-{request.question}
-"""
             stream = gemini_client.models.generate_content_stream(
                 model=GENERATION_MODEL,
-                contents=prompt,
+                contents=pipeline_result["prompt"],
             )
             for chunk in stream:
                 if chunk.text:
@@ -159,9 +132,10 @@ Question:
             yield 'data: {"type": "done"}\n\n'
 
         except Exception as err:
+            logger.error("Error during streaming response: %s", err, exc_info=True)
             err_payload = json.dumps({
                 "type": "error",
-                "error": str(err),
+                "error": "An error occurred while generating the answer. Please try again.",
             })
             yield f"data: {err_payload}\n\n"
 

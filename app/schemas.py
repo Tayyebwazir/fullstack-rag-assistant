@@ -2,15 +2,16 @@
 
 from pydantic import BaseModel, Field
 
-
 class QuestionRequest(BaseModel):
     """Payload for asking a question against a tenant's ingested documents."""
 
     question: str = Field(min_length=1, max_length=4000)
     source_filter: str | None = Field(default=None, description="Optional document filter")
+    tenant_id: str | None = Field(default=None, description="Optional target tenant ID to verify access")
 
 
 class DocIdRequest(BaseModel):
     """Payload identifying a single document by UUID."""
 
     doc_id: str
+    tenant_id: str | None = Field(default=None, description="Optional target tenant ID to verify access")

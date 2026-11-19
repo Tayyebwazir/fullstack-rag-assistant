@@ -1,12 +1,7 @@
 import time
-from google import genai
 from google.genai import types
-from app.config import GEMINI_API_KEY, EMBEDDING_MODEL
-
-if not GEMINI_API_KEY:
-    raise RuntimeError("Set gemini_api_key in .env")
-
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+from app.config import EMBEDDING_MODEL
+from app.services.gemini_client import get_gemini_client
 
 # In-memory query vector cache to prevent repeated rate limits
 _query_cache: dict[str, list[float]] = {}
@@ -37,7 +32,7 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
                 contents = [types.Content(parts=[types.Part.from_text(text=t)]) for t in batch]
                 for attempt in range(5):
                     try:
-                        response = gemini_client.models.embed_content(
+                        response = get_gemini_client().models.embed_content(
                             model=model_name,
                             contents=contents,
                             config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
@@ -69,10 +64,6 @@ def embed_documents(texts: list[str], batch_size: int = 50) -> list[list[float]]
     return []
 
 
-def embed_document(text: str) -> list[float]:
-    return embed_documents([text])[0]
-
-
 def embed_query(question: str) -> list[float]:
     norm_q = question.strip().lower()
     if norm_q in _query_cache:
@@ -84,7 +75,7 @@ def embed_query(question: str) -> list[float]:
     for model_name in models:
         for attempt in range(3):
             try:
-                response = gemini_client.models.embed_content(
+                response = get_gemini_client().models.embed_content(
                     model=model_name,
                     contents=question,
                     config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY"),

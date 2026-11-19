@@ -1,12 +1,15 @@
+import logging
 import os
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from google.oauth2 import id_token
 from google.auth.transport import requests as google_requests
 
+logger = logging.getLogger(__name__)
+
 security = HTTPBearer(auto_error=False)
 
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "authen-81a29")
+from app.config import FIREBASE_PROJECT_ID
 google_request_adapter = google_requests.Request()
 
 
@@ -26,6 +29,13 @@ def get_current_user(
         )
 
     token = auth_header.credentials
+
+    if not FIREBASE_PROJECT_ID:
+        logger.error("FIREBASE_PROJECT_ID is not configured in environment variables.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication service configuration error.",
+        )
 
     try:
         # Cryptographically verifies token signature, expiration, issuer and audience
@@ -51,16 +61,18 @@ def get_current_user(
             "id_token": token,
         }
     except ValueError as exc:
+        logger.warning("Token verification failed: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired authentication token: {exc}",
+            detail="Invalid or expired authentication token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except HTTPException:
         raise
     except Exception as exc:
+        logger.error("Unexpected authentication error: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Authentication error: {exc}",
+            detail="Authentication failed. Unable to verify credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         )

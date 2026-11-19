@@ -14,29 +14,39 @@ def resolve_authorized_user(
     user: dict,
     required_permission: str | None = None,
 ) -> tuple[dict | None, str, str | None]:
-    """Resolves user profile and checks tenant RBAC permission if requested.
-
+    """Resolves user profile and checks tenant RBAC permission without unsafe fallbacks.
     Returns `(user_record, authorized_tenant, error_message)`.
     """
-    uid = user.get("uid")
+    uid = user.get("uid") if user else None
+    if not uid:
+        return None, "", "Authentication required: Missing user UID."
     user_record = get_user_record(uid, user.get("email", ""), user.get("id_token"))
     if not user_record:
         return None, "", "Access Denied: Your User ID has not been registered in the database."
-
-    authorized_tenant = user_record.get("tenant_id", "alpha")
+    # STRICT: Never fall back to 'alpha' or 'default'. Must have an authentic assigned tenant.
+    authorized_tenant = user_record.get("tenant_id")
+    if not authorized_tenant:
+        return user_record, "", "Access Denied: No tenant assigned to this user account."
     if required_permission:
         authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, required_permission)
         if not authorized:
             return user_record, authorized_tenant, err_msg
-
     return user_record, authorized_tenant, None
-
-
 def require_tenant_permission(permission: str):
     """Dependency factory enforcing authentication and strict single-tenant permission."""
-
     def _dependency(user: dict = Depends(get_current_user)) -> dict:
+        if not user or not user.get("uid"):
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required: missing or invalid user UID.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
         user_record, authorized_tenant, err_msg = resolve_authorized_user(user, permission)
+        if not user_record or not authorized_tenant:
+            raise HTTPException(
+                status_code=403,
+                detail=err_msg or "Access Denied: No authorized tenant assigned.",
+            )
         if err_msg:
             raise HTTPException(status_code=403, detail=err_msg)
         return {
@@ -44,7 +54,6 @@ def require_tenant_permission(permission: str):
             "user_record": user_record,
             "tenant_id": authorized_tenant,
         }
-
     return _dependency
 
 

@@ -9,8 +9,12 @@ frontend/.env
 !**/.env.example
 
 # Service Accounts & Keys
-serviceAccountKey.json
+*firebase-adminsdk*.json
+firebase_credentials*.json
+serviceAccountKey*.json
 service_account*.json
+app/data/firebase_credentials.json
+app/data/rate_limits.json
 *.pem
 *.key
 credentials.json
@@ -65,3 +69,7 @@ Thumbs.db
 # Runtime data & uploads
 app/data/firebase_*.json
 app/data/tenants/
+
+# Local test scratch scripts
+test_security.py
+test_issue8.py

@@ -1,3 +1,4 @@
+import os
 import json
 import uuid
 from datetime import datetime, timezone
@@ -11,7 +12,8 @@ from app.config import FIREBASE_PROJECT_ID, BASE_DIR
 USERS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_users.json"
 DOCUMENTS_STORE_FILE = BASE_DIR / "app" / "data" / "firebase_documents.json"
 CREDENTIALS_FILE = BASE_DIR / "app" / "data" / "firebase_credentials.json"
-FALLBACK_CREDENTIALS_FILE = Path(r"D:\DB_config\authen-81a29-firebase-adminsdk-fbsvc-457a3fc98f.json")
+_SERVICE_ACCOUNT_ENV = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH") or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+SERVICE_ACCOUNT_PATH = Path(_SERVICE_ACCOUNT_ENV) if _SERVICE_ACCOUNT_ENV else None
 
 DEFAULT_PERMISSIONS = ["READ", "WRITE", "UPDATE", "DELETE", "INGEST"]
 
@@ -25,10 +27,10 @@ def _get_firestore_client():
     try:
         if not firebase_admin._apps:
             cred_file = None
-            if CREDENTIALS_FILE.exists():
+            if SERVICE_ACCOUNT_PATH and SERVICE_ACCOUNT_PATH.exists():
+                cred_file = SERVICE_ACCOUNT_PATH
+            elif CREDENTIALS_FILE.exists():
                 cred_file = CREDENTIALS_FILE
-            elif FALLBACK_CREDENTIALS_FILE.exists():
-                cred_file = FALLBACK_CREDENTIALS_FILE
 
             if cred_file:
                 cred = credentials.Certificate(str(cred_file))

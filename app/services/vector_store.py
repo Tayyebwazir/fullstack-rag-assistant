@@ -23,6 +23,36 @@ def connect_weaviate():
     return weaviate.connect_to_local()
 
 
+_weaviate_client: weaviate.WeaviateClient | None = None
+
+
+def get_weaviate_client() -> weaviate.WeaviateClient:
+    """Returns a process-wide reusable Weaviate client, reconnecting if disconnected."""
+    global _weaviate_client
+    if _weaviate_client is not None:
+        try:
+            if _weaviate_client.is_connected():
+                return _weaviate_client
+        except Exception:
+            pass
+    _weaviate_client = connect_weaviate()
+    return _weaviate_client
+
+
+def close_weaviate_client() -> None:
+    """Closes the reusable Weaviate client on application shutdown."""
+    global _weaviate_client
+    if _weaviate_client is not None:
+        try:
+            _weaviate_client.close()
+            print("[Weaviate] Successfully closed reusable client connection.")
+        except Exception as err:
+            print(f"[Weaviate] Error closing client: {err}")
+        finally:
+            _weaviate_client = None
+
+
+
 def ensure_collection(client):
     if not client.collections.exists(COLLECTION_NAME):
         client.collections.create(
@@ -67,12 +97,12 @@ def ensure_collection(client):
 def get_weaviate_tenants() -> list[str]:
     """Retrieves all active tenant shards directly from Weaviate DB without any hardcoded fallbacks."""
     try:
-        with connect_weaviate() as client:
-            if not client.collections.exists(COLLECTION_NAME):
-                return []
-            col = client.collections.get(COLLECTION_NAME)
-            tenants = list(col.tenants.get().keys())
-            return tenants
+        client = get_weaviate_client()
+        if not client.collections.exists(COLLECTION_NAME):
+            return []
+        col = client.collections.get(COLLECTION_NAME)
+        tenants = list(col.tenants.get().keys())
+        return tenants
     except Exception as e:
         print(f"[Weaviate] Error fetching tenants: {e}")
         return []
@@ -81,12 +111,12 @@ def get_weaviate_tenants() -> list[str]:
 def create_weaviate_tenant(tenant_id: str | None = None) -> str:
     """Creates a new tenant shard in Weaviate using a UUIDv4 (matching weaviate_connection.py)."""
     target = tenant_id.strip() if tenant_id and tenant_id.strip() else str(uuid.uuid4())
-    with connect_weaviate() as client:
-        collection = ensure_collection(client)
-        existing = list(collection.tenants.get().keys())
-        if target not in existing:
-            collection.tenants.create([Tenant(name=target)])
-            print(f"[Weaviate] Dynamically provisioned dedicated UUID tenant shard: '{target}'")
+    client = get_weaviate_client()
+    collection = ensure_collection(client)
+    existing = list(collection.tenants.get().keys())
+    if target not in existing:
+        collection.tenants.create([Tenant(name=target)])
+        print(f"[Weaviate] Dynamically provisioned dedicated UUID tenant shard: '{target}'")
     return target
 
 
@@ -114,82 +144,82 @@ def ingest_chunks(
     if len(chunks) != len(vectors):
         raise ValueError("Each chunk must have exactly one vector")
 
-    with connect_weaviate() as client:
-        collection = ensure_collection(client)
-        active_tenant = ensure_tenant(collection, tenant_id)
+    client = get_weaviate_client()
+    collection = ensure_collection(client)
+    active_tenant = ensure_tenant(collection, tenant_id)
 
-        tenant_collection = collection.with_tenant(active_tenant)
+    tenant_collection = collection.with_tenant(active_tenant)
 
-        if doc_id:
-            try:
-                tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
-            except Exception:
-                pass
-        tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source))
+    if doc_id:
+        try:
+            tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
+        except Exception:
+            pass
+    tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source))
 
-        for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
-            object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{active_tenant}:{doc_id or source}:{index}")
-            tenant_collection.data.insert(
-                uuid=object_id,
-                properties={
-                    "content": chunk["content"],
-                    "source": source,
-                    "page": chunk["page"],
-                    "chunk_index": index,
-                    "doc_id": doc_id,
-                },
-                vector=vector,
-            )
-        return len(chunks)
+    for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        object_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{active_tenant}:{doc_id or source}:{index}")
+        tenant_collection.data.insert(
+            uuid=object_id,
+            properties={
+                "content": chunk["content"],
+                "source": source,
+                "page": chunk["page"],
+                "chunk_index": index,
+                "doc_id": doc_id,
+            },
+            vector=vector,
+        )
+    return len(chunks)
 
 
 def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "default") -> int:
     """Deletes all chunks belonging to doc_id inside the tenant's isolated shard."""
-    with connect_weaviate() as client:
-        if not client.collections.exists(COLLECTION_NAME):
-            return 0
-        collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = ensure_tenant(collection, tenant_id)
-        tenant_collection = collection.with_tenant(target_tenant)
-        try:
-            res = tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
-            return res.successful if hasattr(res, "successful") else 1
-        except Exception as exc:
-            print(f"[Weaviate] Delete error for doc_id {doc_id}: {exc}")
-            return 0
+    client = get_weaviate_client()
+    if not client.collections.exists(COLLECTION_NAME):
+        return 0
+    collection = client.collections.get(COLLECTION_NAME)
+    target_tenant = ensure_tenant(collection, tenant_id)
+    tenant_collection = collection.with_tenant(target_tenant)
+    try:
+        res = tenant_collection.data.delete_many(where=Filter.by_property("doc_id").equal(doc_id))
+        return res.successful if hasattr(res, "successful") else 1
+    except Exception as exc:
+        print(f"[Weaviate] Delete error for doc_id {doc_id}: {exc}")
+        return 0
 
 
 def delete_tenant_document(source_name: str, tenant_id: str = "default") -> int:
     """Deletes all chunks belonging to source_name inside tenant_id's shard."""
-    with connect_weaviate() as client:
-        if not client.collections.exists(COLLECTION_NAME):
-            return 0
-        collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = ensure_tenant(collection, tenant_id)
-        tenant_collection = collection.with_tenant(target_tenant)
-        res = tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source_name))
-        return res.successful if hasattr(res, "successful") else 1
+    client = get_weaviate_client()
+    if not client.collections.exists(COLLECTION_NAME):
+        return 0
+    collection = client.collections.get(COLLECTION_NAME)
+    target_tenant = ensure_tenant(collection, tenant_id)
+    tenant_collection = collection.with_tenant(target_tenant)
+    res = tenant_collection.data.delete_many(where=Filter.by_property("source").equal(source_name))
+    return res.successful if hasattr(res, "successful") else 1
 
 
 def get_tenant_documents_summary(tenant_id: str = "default") -> list[dict]:
     """Returns unique document sources and their chunk count in tenant_id's shard."""
-    with connect_weaviate() as client:
-        if not client.collections.exists(COLLECTION_NAME):
-            return []
-        collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = ensure_tenant(collection, tenant_id)
-        tenant_collection = collection.with_tenant(target_tenant)
+    client = get_weaviate_client()
+    if not client.collections.exists(COLLECTION_NAME):
+        return []
+    collection = client.collections.get(COLLECTION_NAME)
+    target_tenant = ensure_tenant(collection, tenant_id)
+    tenant_collection = collection.with_tenant(target_tenant)
 
-        objects = tenant_collection.query.fetch_objects(limit=1000).objects
-        counts = {}
-        for obj in objects:
-            src = obj.properties.get("source", "unknown")
-            counts[src] = counts.get(src, 0) + 1
+    objects = tenant_collection.query.fetch_objects(limit=1000).objects
+    counts = {}
+    for obj in objects:
+        src = obj.properties.get("source", "unknown")
+        counts[src] = counts.get(src, 0) + 1
 
-        return [
-            {"source": src, "chunk_count": count, "tenant": target_tenant}
-            for src, count in counts.items()
-        ]
+    return [
+        {"source": src, "chunk_count": count, "tenant": target_tenant}
+        for src, count in counts.items()
+    ]
 
 
 def search_chunks(
@@ -199,41 +229,41 @@ def search_chunks(
     limit: int = 4,
     distance_threshold: float = DISTANCE_THRESHOLD,
 ) -> list[dict]:
-    with connect_weaviate() as client:
-        if not client.collections.exists(COLLECTION_NAME):
-            raise ValueError("No ingested collection found. Please ingest documents first.")
+    client = get_weaviate_client()
+    if not client.collections.exists(COLLECTION_NAME):
+        raise ValueError("No ingested collection found. Please ingest documents first.")
 
-        collection = client.collections.get(COLLECTION_NAME)
-        target_tenant = ensure_tenant(collection, tenant_id)
-        tenant_collection = collection.with_tenant(target_tenant)
+    collection = client.collections.get(COLLECTION_NAME)
+    target_tenant = ensure_tenant(collection, tenant_id)
+    tenant_collection = collection.with_tenant(target_tenant)
 
-        filters = None
-        if source_filter and source_filter != "all":
-            filters = Filter.by_property("source").equal(source_filter)
+    filters = None
+    if source_filter and source_filter != "all":
+        filters = Filter.by_property("source").equal(source_filter)
 
-        response = tenant_collection.query.near_vector(
-            near_vector=query_vector,
-            filters=filters,
-            limit=limit,
-            return_metadata=MetadataQuery(distance=True, certainty=True),
-        )
+    response = tenant_collection.query.near_vector(
+        near_vector=query_vector,
+        filters=filters,
+        limit=limit,
+        return_metadata=MetadataQuery(distance=True, certainty=True),
+    )
 
-        filtered_chunks = []
-        for obj in response.objects:
-            dist = getattr(obj.metadata, "distance", None)
-            # Cut off: Reject chunks with distance greater than threshold
-            if dist is not None and dist > distance_threshold:
-                continue
+    filtered_chunks = []
+    for obj in response.objects:
+        dist = getattr(obj.metadata, "distance", None)
+        # Cut off: Reject chunks with distance greater than threshold
+        if dist is not None and dist > distance_threshold:
+            continue
 
-            filtered_chunks.append({
-                "source": obj.properties.get("source", "unknown"),
-                "page": obj.properties.get("page", 1),
-                "chunk_index": obj.properties.get("chunk_index", 0),
-                "content": obj.properties.get("content", ""),
-                "doc_id": obj.properties.get("doc_id", ""),
-                "tenant": target_tenant,
-                "distance": dist,
-                "certainty": getattr(obj.metadata, "certainty", None),
-            })
+        filtered_chunks.append({
+            "source": obj.properties.get("source", "unknown"),
+            "page": obj.properties.get("page", 1),
+            "chunk_index": obj.properties.get("chunk_index", 0),
+            "content": obj.properties.get("content", ""),
+            "doc_id": obj.properties.get("doc_id", ""),
+            "tenant": target_tenant,
+            "distance": dist,
+            "certainty": getattr(obj.metadata, "certainty", None),
+        })
 
-        return filtered_chunks
+    return filtered_chunks
