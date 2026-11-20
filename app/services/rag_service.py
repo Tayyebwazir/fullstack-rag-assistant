@@ -31,7 +31,7 @@ Remind the user briefly that they can ask questions about their uploaded PDF doc
 
 def prepare_rag_pipeline(
     question: str,
-    tenant_id: str = "alpha",
+    tenant_id: str,
     source_filter: str | None = None,
 ) -> dict:
     """Shared RAG pipeline executing embedding, retrieval, distance filtering,
@@ -99,14 +99,14 @@ Question:
 
 def answer_question(
     question: str,
-    tenant_id: str = "alpha",
+    tenant_id: str,
     source_filter: str | None = None,
 ) -> dict:
     """Answers a question using the shared RAG pipeline and shared Gemini client."""
     client = get_gemini_client()
 
     if is_conversational_or_greeting(question):
-        greeting_prompt = get_greeting_prompt(question)
+        greeting_prompt = get_greeting_prompt(question, tenant_id=tenant_id)
         resp = client.models.generate_content(
             model=GENERATION_MODEL,
             contents=greeting_prompt,

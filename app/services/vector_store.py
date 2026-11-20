@@ -137,7 +137,7 @@ def ingest_chunks(
     chunks: list[dict],
     source: str,
     vectors: list[list[float]],
-    tenant_id: str = "default",
+    tenant_id: str,
     doc_id: str = "",
 ) -> int:
     """Inserts chunk vectors strictly into the dynamically authorized tenant's shard."""
@@ -173,7 +173,7 @@ def ingest_chunks(
     return len(chunks)
 
 
-def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "default") -> int:
+def delete_tenant_document_by_id(doc_id: str, tenant_id: str) -> int:
     """Deletes all chunks belonging to doc_id inside the tenant's isolated shard."""
     client = get_weaviate_client()
     if not client.collections.exists(COLLECTION_NAME):
@@ -189,7 +189,7 @@ def delete_tenant_document_by_id(doc_id: str, tenant_id: str = "default") -> int
         return 0
 
 
-def delete_tenant_document(source_name: str, tenant_id: str = "default") -> int:
+def delete_tenant_document(source_name: str, tenant_id: str) -> int:
     """Deletes all chunks belonging to source_name inside tenant_id's shard."""
     client = get_weaviate_client()
     if not client.collections.exists(COLLECTION_NAME):
@@ -201,7 +201,7 @@ def delete_tenant_document(source_name: str, tenant_id: str = "default") -> int:
     return res.successful if hasattr(res, "successful") else 1
 
 
-def get_tenant_documents_summary(tenant_id: str = "default") -> list[dict]:
+def get_tenant_documents_summary(tenant_id: str) -> list[dict]:
     """Returns unique document sources and their chunk count in tenant_id's shard."""
     client = get_weaviate_client()
     if not client.collections.exists(COLLECTION_NAME):
@@ -224,7 +224,7 @@ def get_tenant_documents_summary(tenant_id: str = "default") -> list[dict]:
 
 def search_chunks(
     query_vector: list[float],
-    tenant_id: str = "default",
+    tenant_id: str,
     source_filter: str | None = None,
     limit: int = 4,
     distance_threshold: float = DISTANCE_THRESHOLD,
