@@ -126,15 +126,14 @@ def create_weaviate_tenant(tenant_id: str | None = None) -> str:
 
 
 def ensure_tenant(collection, tenant_id: str) -> str:
-    """Dynamically creates the tenant shard in Weaviate if it does not already exist."""
-    target = tenant_id.strip() if tenant_id and tenant_id.strip() else str(uuid.uuid4())
+    """Verifies or dynamically creates the tenant shard in Weaviate."""
+    if not tenant_id or not tenant_id.strip():
+        raise ValueError("A valid tenant_id is strictly required. No default or fallback allowed.")
+    target = tenant_id.strip()
     existing = list(collection.tenants.get().keys())
     if target not in existing:
-        try:
-            collection.tenants.create([Tenant(name=target)])
-            print(f"[Weaviate] Dynamically provisioned new tenant shard: '{target}'")
-        except Exception as e:
-            print(f"[Weaviate] Note ensuring tenant {target}: {e}")
+        collection.tenants.create([Tenant(name=target)])
+        print(f"[Weaviate] Dynamically provisioned new tenant shard: '{target}'")
     return target
 
 

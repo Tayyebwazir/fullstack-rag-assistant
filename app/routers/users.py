@@ -35,9 +35,11 @@ def get_user_profile(user: dict = Depends(get_current_user)):
 
     assigned_tenant = profile.get("tenant_id")
     if not assigned_tenant:
+        tenant_err = profile.get("tenant_error")
+        detail_msg = f"Access Denied: {tenant_err}" if tenant_err else "Access Denied: No tenant assigned to this user."
         raise HTTPException(
             status_code=403,
-            detail="Access Denied: No tenant assigned to this user.",
+            detail=detail_msg,
         )
 
     return {

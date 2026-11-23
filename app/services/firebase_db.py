@@ -113,17 +113,18 @@ def _build_rest_patch_url(doc_path: str, field_names: list[str]) -> str:
     return f"{base}?{query}"
 
 
-def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant: str = "") -> str:
+def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant: str = "") -> tuple[str, str | None]:
     """Assigns a strictly UNIQUE tenant shard for each user directly from Weaviate DB.
     Guarantees no two users share the same tenant.
-    Always uses real Weaviate UUID tenant IDs.
+    Never uses fallbacks like 'alpha' or 'default'.
+    Returns (tenant_id, error_message).
     """
     try:
         from app.services.vector_store import get_weaviate_tenants, create_weaviate_tenant
         weaviate_tenants = get_weaviate_tenants()
     except Exception as e:
         print(f"[Weaviate] Error getting tenants: {e}")
-        weaviate_tenants = []
+        return "", f"Error connecting to Weaviate: {e}"
 
     candidates = [t.strip() for t in (current_fs_tenant, local_data.get(uid, {}).get("tenant_id", "")) if t and t.strip()]
 
@@ -131,7 +132,7 @@ def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant
     if not weaviate_tenants:
         for cand in candidates:
             if _is_valid_uuid(cand):
-                return cand
+                return cand, None
 
     # Collect all tenants currently claimed by OTHER users in local store
     other_assigned_tenants = {
@@ -154,9 +155,9 @@ def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant
     # If this user already has a valid tenant from Weaviate that is not claimed by anyone else, keep it
     for cand in candidates:
         if _is_valid_weaviate_tenant(cand, weaviate_tenants) and cand not in other_assigned_tenants:
-            return cand
+            return cand, None
 
-    # Look for an available, unassigned tenant in Weaviate (e.g., db261c85-2d6f-4a93-8aeb-1f725a5e30cc)
+    # Look for an available, unassigned tenant in Weaviate
     available = [
         t for t in weaviate_tenants
         if t not in other_assigned_tenants and _is_valid_weaviate_tenant(t, weaviate_tenants)
@@ -164,18 +165,21 @@ def _assign_unique_tenant_for_user(uid: str, local_data: dict, current_fs_tenant
 
     if available:
         available.sort()
-        return available[0]
+        return available[0], None
 
-    # If all existing Weaviate tenants are taken (or no tenant exists), dynamically create a new UUID tenant in Weaviate!
+    # If all existing Weaviate tenants are taken (or no tenant exists), dynamically create a new UUID tenant in Weaviate.
+    # Note: We do NOT hardcode any limit. Weaviate Cloud enforces its own tier limits automatically.
     new_tenant = str(uuid.uuid4())
     try:
         from app.services.vector_store import create_weaviate_tenant
         create_weaviate_tenant(new_tenant)
         print(f"[Weaviate] Dynamically provisioned new UUID tenant shard: '{new_tenant}'")
+        return new_tenant, None
     except Exception as e:
-        print(f"[Weaviate] Note provisioning shard {new_tenant}: {e}")
-
-    return new_tenant
+        err_msg = str(e)
+        print(f"[Weaviate] Failed to provision tenant shard in Weaviate: {err_msg}")
+        # Never fall back to 'alpha', 'default', or an existing tenant!
+        return "", f"Weaviate tenant allocation failed ({err_msg})"
 
 
 def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> dict:
@@ -201,7 +205,7 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
         print(f"[FirebaseDB] Firestore read note: {e}")
 
     # Assign a unique, isolated tenant for this user directly from Weaviate
-    user_tenant = _assign_unique_tenant_for_user(uid, local_data, fs_tenant)
+    user_tenant, tenant_err = _assign_unique_tenant_for_user(uid, local_data, fs_tenant)
 
     effective_email = email or fs_email or local_data.get(uid, {}).get("email", "")
     fs_doc_ids = fs_record.get("document_ids") if isinstance(fs_record.get("document_ids"), list) else None
@@ -213,6 +217,7 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
         "user_uuid": uid,
         "email": effective_email,
         "tenant_id": user_tenant,
+        "tenant_error": tenant_err,
         "is_active": fs_record.get("is_active", local_data.get(uid, {}).get("is_active", True)),
         "permissions": fs_record.get("permissions", local_data.get(uid, {}).get("permissions", DEFAULT_PERMISSIONS)),
         "document_ids": existing_doc_ids,
@@ -234,6 +239,8 @@ def get_user_record(uid: str, email: str = "", id_token: str | None = None) -> d
                 "created_at": record["created_at"],
                 "last_login": record["last_login"],
             }
+            if tenant_err:
+                user_update["tenant_error"] = tenant_err
             db.collection("users").document(uid).set(user_update, merge=True)
             admin_synced = True
             print(f"[FirebaseDB Admin] Synced Firestore users/{uid} with tenant_id '{user_tenant}'")

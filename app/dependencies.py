@@ -26,7 +26,9 @@ def resolve_authorized_user(
     # STRICT: Never fall back to 'alpha' or 'default'. Must have an authentic assigned tenant.
     authorized_tenant = user_record.get("tenant_id")
     if not authorized_tenant:
-        return user_record, "", "Access Denied: No tenant assigned to this user account."
+        tenant_err = user_record.get("tenant_error")
+        err_detail = f"Access Denied: {tenant_err}" if tenant_err else "Access Denied: No tenant assigned to this user account."
+        return user_record, "", err_detail
     if required_permission:
         authorized, err_msg = verify_tenant_access(user_record, authorized_tenant, required_permission)
         if not authorized:
