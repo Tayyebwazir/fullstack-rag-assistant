@@ -13,7 +13,12 @@ from app.schemas import QuestionRequest
 from app.services.auth import get_current_user
 from app.services.gemini_client import get_gemini_client
 from app.services.intent import is_conversational_or_greeting
-from app.services.rag_service import answer_question, get_greeting_prompt, prepare_rag_pipeline
+from app.services.rag_service import (
+    answer_question,
+    get_greeting_prompt,
+    prepare_rag_pipeline,
+    stream_answer_question,
+)
 
 router = APIRouter(tags=["Q&A / RAG"])
 
@@ -73,63 +78,12 @@ def ask_question_stream(
 
     def event_generator():
         try:
-            gemini_client = get_gemini_client()
-
-            # 1. Check for greetings / non-document general conversation
-            if is_conversational_or_greeting(request.question):
-                empty_meta = json.dumps({"type": "metadata", "chunks": [], "reranked": []})
-                yield f"data: {empty_meta}\n\n"
-
-                greeting_prompt = get_greeting_prompt(request.question, tenant_id=authorized_tenant)
-                stream = gemini_client.models.generate_content_stream(
-                    model=GENERATION_MODEL,
-                    contents=greeting_prompt,
-                )
-                for chunk in stream:
-                    if chunk.text:
-                        token_payload = json.dumps({"type": "token", "token": chunk.text})
-                        yield f"data: {token_payload}\n\n"
-
-                yield 'data: {"type": "done"}\n\n'
-                return
-
-            # 2. Document Question: Use shared RAG pipeline
-            pipeline_result = prepare_rag_pipeline(
+            for event in stream_answer_question(
                 question=request.question,
                 tenant_id=authorized_tenant,
                 source_filter=request.source_filter,
-            )
-
-            meta_payload = json.dumps({
-                "type": "metadata",
-                "chunks": pipeline_result["chunks"],
-                "reranked": pipeline_result["reranked"],
-                "tenant": authorized_tenant,
-            })
-            yield f"data: {meta_payload}\n\n"
-
-            if not pipeline_result["has_chunks"]:
-                empty_payload = json.dumps({
-                    "type": "token",
-                    "token": f"No relevant information found in tenant [{authorized_tenant}].",
-                })
-                yield f"data: {empty_payload}\n\n"
-                yield 'data: {"type": "done"}\n\n'
-                return
-
-            stream = gemini_client.models.generate_content_stream(
-                model=GENERATION_MODEL,
-                contents=pipeline_result["prompt"],
-            )
-            for chunk in stream:
-                if chunk.text:
-                    token_payload = json.dumps({
-                        "type": "token",
-                        "token": chunk.text,
-                    })
-                    yield f"data: {token_payload}\n\n"
-
-            yield 'data: {"type": "done"}\n\n'
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
 
         except Exception as err:
             logger.error("Error during streaming response: %s", err, exc_info=True)

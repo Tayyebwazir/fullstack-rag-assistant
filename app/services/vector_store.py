@@ -16,9 +16,14 @@ def connect_weaviate():
     if WEAVIATE_MODE == "cloud":
         if not WEAVIATE_URL or not WEAVIATE_API_KEY:
             raise RuntimeError("Set Weaviate credentials in .env")
+        import weaviate.classes as wvc
         return weaviate.connect_to_weaviate_cloud(
             cluster_url=WEAVIATE_URL,
             auth_credentials=weaviate.auth.AuthApiKey(WEAVIATE_API_KEY),
+            skip_init_checks=True,
+            additional_config=wvc.init.AdditionalConfig(
+                timeout=wvc.init.Timeout(init=30, query=60, insert=60)
+            ),
         )
     return weaviate.connect_to_local()
 
@@ -229,24 +234,37 @@ def search_chunks(
     limit: int = 4,
     distance_threshold: float = DISTANCE_THRESHOLD,
 ) -> list[dict]:
-    client = get_weaviate_client()
-    if not client.collections.exists(COLLECTION_NAME):
-        raise ValueError("No ingested collection found. Please ingest documents first.")
-
-    collection = client.collections.get(COLLECTION_NAME)
-    target_tenant = ensure_tenant(collection, tenant_id)
-    tenant_collection = collection.with_tenant(target_tenant)
-
     filters = None
     if source_filter and source_filter != "all":
         filters = Filter.by_property("source").equal(source_filter)
 
-    response = tenant_collection.query.near_vector(
-        near_vector=query_vector,
-        filters=filters,
-        limit=limit,
-        return_metadata=MetadataQuery(distance=True, certainty=True),
-    )
+    response = None
+    last_exc = None
+    for attempt in range(3):
+        try:
+            client = get_weaviate_client()
+            if not client.collections.exists(COLLECTION_NAME):
+                raise ValueError("No ingested collection found. Please ingest documents first.")
+
+            collection = client.collections.get(COLLECTION_NAME)
+            target_tenant = ensure_tenant(collection, tenant_id)
+            tenant_collection = collection.with_tenant(target_tenant)
+
+            response = tenant_collection.query.near_vector(
+                near_vector=query_vector,
+                filters=filters,
+                limit=limit,
+                return_metadata=MetadataQuery(distance=True, certainty=True),
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                import time
+                time.sleep(1.5 * (attempt + 1))
+                close_weaviate_client()
+                continue
+            raise last_exc
 
     filtered_chunks = []
     for obj in response.objects:

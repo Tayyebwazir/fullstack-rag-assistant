@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import ALLOWED_ORIGINS
+from app.config import ALLOWED_ORIGINS, COHERE_API_KEY
 from app.dependencies import require_tenant_permission
 from app.routers import chat, documents, users
 from app.routers.documents import get_sources as _get_sources_endpoint
@@ -18,6 +18,8 @@ from app.services.gemini_client import get_gemini_client
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manages shared client startup and graceful shutdown."""
+    if not COHERE_API_KEY or COHERE_API_KEY.startswith("your-"):
+        print("[WARNING] COHERE_API_KEY is not configured in .env. Cohere reranking is disabled and will fall back to vector search candidates.")
     try:
         get_weaviate_client()
     except Exception as exc:

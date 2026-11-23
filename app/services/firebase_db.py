@@ -359,8 +359,13 @@ def create_document_record(doc_data: dict, id_token: str | None = None) -> dict:
     docs = _load_local_documents()
     doc_id = doc_data.get("doc_id") or str(uuid.uuid4())
     doc_data["doc_id"] = doc_id
-    tenant_id = doc_data.get("tenant_id", "default")
     owner_uid = doc_data.get("owner_uid", "")
+    tenant_id = doc_data.get("tenant_id")
+    if not tenant_id and owner_uid:
+        tenant_id = derive_tenant_id(owner_uid)
+        doc_data["tenant_id"] = tenant_id
+    elif not tenant_id:
+        tenant_id = ""
     owner_email = _resolve_user_email(owner_uid, doc_data.get("owner_email", ""))
     doc_data["owner_email"] = owner_email
     docs[doc_id] = doc_data
@@ -451,7 +456,7 @@ def update_document_record(doc_id: str, updates: dict, id_token: str | None = No
         return None
 
     docs[doc_id].update(updates)
-    tenant_id = docs[doc_id].get("tenant_id", "default")
+    tenant_id = docs[doc_id].get("tenant_id", "")
     owner_uid = updates.get("owner_uid") or docs[doc_id].get("owner_uid", "")
     owner_email = updates.get("owner_email") or docs[doc_id].get("owner_email") or _resolve_user_email(owner_uid)
     if owner_email and not docs[doc_id].get("owner_email"):
@@ -613,7 +618,7 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
     docs = _load_local_documents()
     if doc_id in docs:
         doc_info = docs[doc_id]
-        tenant_id = doc_info.get("tenant_id", "default")
+        tenant_id = doc_info.get("tenant_id", "")
         owner_uid = doc_info.get("owner_uid", "")
         del docs[doc_id]
         _save_local_documents(docs)

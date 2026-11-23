@@ -1,4 +1,5 @@
 import logging
+import time
 import requests
 from typing import Any
 from app.config import COHERE_API_KEY, RERANK_MODEL, RERANK_TOP_K
@@ -24,35 +25,48 @@ def rerank_chunks(
     if not chunks:
         return []
 
-    if not COHERE_API_KEY:
-        logger.warning(
-            "COHERE_API_KEY is missing in .env; skipping rerank and returning top %d chunks from vector search.",
-            top_k,
+    if not COHERE_API_KEY or COHERE_API_KEY.startswith("your-"):
+        import warnings
+        msg = (
+            "COHERE_API_KEY is missing or unconfigured in .env. "
+            f"Cohere reranking cannot execute; falling back to top {top_k} vector search candidates."
         )
+        warnings.warn(msg, UserWarning, stacklevel=2)
+        logger.warning(msg)
+        print(f"\n[WARNING] {msg}\n")
         return chunks[:top_k]
 
     try:
         # 1. Extract chunk texts
         documents = [c.get("content", "") for c in chunks]
 
-        # 2. Call Cohere Rerank v2 API
-        response = requests.post(
-            "https://api.cohere.com/v2/rerank",
-            headers={
-                "Authorization": f"Bearer {COHERE_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": RERANK_MODEL,
-                "query": question,
-                "documents": documents,
-                "top_n": top_k,
-            },
-            timeout=10,
-        )
+        # 2. Call Cohere Rerank v2 API with rate-limit retry
+        response = None
+        for attempt in range(4):
+            response = requests.post(
+                "https://api.cohere.com/v2/rerank",
+                headers={
+                    "Authorization": f"Bearer {COHERE_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": RERANK_MODEL,
+                    "query": question,
+                    "documents": documents,
+                    "top_n": top_k,
+                },
+                timeout=12,
+            )
 
-        if response.status_code != 200:
-            logger.error("Cohere Rerank API returned status %d: %s", response.status_code, response.text)
+            if response.status_code == 429 and attempt < 3:
+                wait_sec = 6 * (attempt + 1)
+                time.sleep(wait_sec)
+                continue
+            break
+
+        if response is None or response.status_code != 200:
+            err_msg = response.text if response is not None else "No response"
+            logger.error("Cohere Rerank API returned error: %s", err_msg)
             return chunks[:top_k]
 
         data = response.json()

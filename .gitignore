@@ -73,3 +73,4 @@ app/data/tenants/
 # Local test scratch scripts
 test_security.py
 test_issue8.py
+test_evaluate_rag.py
