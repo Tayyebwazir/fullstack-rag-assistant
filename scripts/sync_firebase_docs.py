@@ -58,7 +58,10 @@ def sync_all_to_firestore():
 
     # 2. Sync all documents into root collection 'docs' and legacy tenant collection
     for doc_id, doc in documents.items():
-        tenant_id = doc.get("tenant_id", "default")
+        tenant_id = (doc.get("tenant_id") or "").strip()
+        if not tenant_id or tenant_id.lower() in ("default", "alpha", "beta", "tri") or tenant_id.startswith("tenant_"):
+            print(f"[SKIP] Document {doc_id} ('{doc.get('filename')}') has missing or invalid tenant '{tenant_id}'. Safely skipping.")
+            continue
         clean_doc = {
             "doc_id": doc_id,
             "filename": doc.get("filename", ""),
@@ -131,8 +134,8 @@ def sync_all_to_firestore():
         with connect_weaviate() as w_client:
             coll = w_client.collections.get(COLLECTION_NAME)
             for doc_id, doc in documents.items():
-                tenant_id = doc.get("tenant_id")
-                if not tenant_id or doc.get("status") != "completed":
+                tenant_id = (doc.get("tenant_id") or "").strip()
+                if not tenant_id or tenant_id.lower() in ("default", "alpha", "beta", "tri") or tenant_id.startswith("tenant_") or doc.get("status") != "completed":
                     continue
                 try:
                     tenant = coll.with_tenant(tenant_id)

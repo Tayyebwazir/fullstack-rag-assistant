@@ -367,12 +367,10 @@ def create_document_record(doc_data: dict, id_token: str | None = None) -> dict:
     doc_id = doc_data.get("doc_id") or str(uuid.uuid4())
     doc_data["doc_id"] = doc_id
     owner_uid = doc_data.get("owner_uid", "")
-    tenant_id = doc_data.get("tenant_id")
-    if not tenant_id and owner_uid:
-        tenant_id = derive_tenant_id(owner_uid)
-        doc_data["tenant_id"] = tenant_id
-    elif not tenant_id:
-        tenant_id = ""
+    tenant_id = (doc_data.get("tenant_id") or "").strip()
+    if not tenant_id or tenant_id.lower() in ("default", "alpha", "beta", "tri") or tenant_id.startswith("tenant_"):
+        raise ValueError(f"Explicit, valid tenant_id is required to create a document record. Received invalid or missing tenant: '{tenant_id}'")
+    doc_data["tenant_id"] = tenant_id
     owner_email = _resolve_user_email(owner_uid, doc_data.get("owner_email", ""))
     doc_data["owner_email"] = owner_email
     docs[doc_id] = doc_data
@@ -661,7 +659,8 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
                     print(f"[FirebaseDB Admin] Removed {doc_id} from users/{owner_uid}")
 
                 # D. Delete from legacy tenant docs collection
-                db.collection(f"tenants_{tenant_id}_docs").document(doc_id).delete()
+                if tenant_id and tenant_id.strip():
+                    db.collection(f"tenants_{tenant_id}_docs").document(doc_id).delete()
                 admin_synced = True
                 print(f"[FirebaseDB Admin] Deleted document {doc_id} and its chunks from Firestore")
         except Exception as e:
@@ -672,8 +671,9 @@ def delete_document_record(doc_id: str, id_token: str | None = None) -> bool:
             try:
                 url_doc = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/docs/{doc_id}"
                 requests.delete(url_doc, headers={"Authorization": f"Bearer {id_token}"}, timeout=3)
-                url_tenant = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
-                requests.delete(url_tenant, headers={"Authorization": f"Bearer {id_token}"}, timeout=3)
+                if tenant_id and tenant_id.strip():
+                    url_tenant = f"https://firestore.googleapis.com/v1/projects/{FIREBASE_PROJECT_ID}/databases/(default)/documents/tenants_{tenant_id}_docs/{doc_id}"
+                    requests.delete(url_tenant, headers={"Authorization": f"Bearer {id_token}"}, timeout=3)
             except Exception:
                 pass
         return True
