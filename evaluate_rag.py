@@ -369,8 +369,8 @@ def run_comparison(tenant_id: str, top_k: int = RERANK_TOP_K) -> list[dict]:
 
     results = []
 
-    for threshold in COMPARISON_THRESHOLDS:
-        for use_rerank in [False, True]:
+    for use_rerank in [False, True]:
+        for threshold in COMPARISON_THRESHOLDS:
             state = "ON" if use_rerank else "OFF"
             print(f"\n--- Running Config: Threshold = {threshold:.2f} | Cohere Reranking = {state} ---", flush=True)
             res = evaluate_single_configuration(
@@ -382,7 +382,7 @@ def run_comparison(tenant_id: str, top_k: int = RERANK_TOP_K) -> list[dict]:
                 print_summary=False,
             )
             results.append(res)
-            print(f"    -> Hit@1: {res['hit_at_1']:5.2f}% | Hit@4: {res['hit_at_4']:5.2f}% | MRR: {res['mrr']:.4f}\n", flush=True)
+            print(f"    -> Hit@1: {res['hit_at_1']:5.2f}% | Hit@4: {res['hit_at_4']:5.2f}% | MRR: {res['mrr']:.4f} | Rejection: {res['rejection_rate']:.2f}%\n", flush=True)
 
     # Print Comparison Table
     print_comparison_table(results)
@@ -391,26 +391,35 @@ def run_comparison(tenant_id: str, top_k: int = RERANK_TOP_K) -> list[dict]:
 
 def print_comparison_table(results: list[dict]):
     """Formats and prints the final comparison table in Markdown format."""
-    print("\n" + "=" * 55)
-    print(" RAG EVALUATION COMPARISON TABLE")
-    print("=" * 55 + "\n")
-    print("| Distance Threshold | Reranking | Hit@1 | Hit@4 | MRR |")
-    print("|---|---|---|---|---|")
+    print("\n" + "=" * 65)
+    print(" RAG EVALUATION COMPARISON TABLE (6 CONFIGURATIONS)")
+    print("=" * 65 + "\n")
+    print("| Distance Threshold | Reranking | Hit@1 | Hit@4 | MRR | Out-of-Scope Rejection |")
+    print("|---|---|---|---|---|---|")
     for r in results:
-        print(f"| {r['threshold']:.2f} | {r['reranking']} | {r['hit_at_1']:.2f}% | {r['hit_at_4']:.2f}% | {r['mrr']:.2f} |")
+        print(f"| {r['threshold']:.2f} | {r['reranking']} | {r['hit_at_1']:.2f}% | {r['hit_at_4']:.2f}% | {r['mrr']:.4f} | {r['rejection_rate']:.2f}% |")
 
-    # Determine best configuration (highest MRR, tie-break by Hit@4, Hit@1, reranking ON)
-    best = max(results, key=lambda x: (x["mrr"], x["hit_at_4"], x["hit_at_1"], 1 if x["reranking"] == "ON" else 0))
-    print("\n" + "=" * 55)
+    # Determine best configuration: prioritize 100% out-of-scope rejection, then highest MRR and Hit@1/4
+    best = max(
+        results,
+        key=lambda x: (
+            x["rejection_rate"],
+            x["mrr"],
+            x["hit_at_4"],
+            x["hit_at_1"],
+            1 if x["reranking"] == "ON" else 0,
+        ),
+    )
+    print("\n" + "=" * 65)
     print(f"Best Configuration: Distance Threshold {best['threshold']:.2f} with Cohere Reranking {best['reranking']}")
-    print(f"Performance: Hit@1 = {best['hit_at_1']:.2f}%, Hit@4 = {best['hit_at_4']:.2f}%, MRR = {best['mrr']:.2f}")
+    print(f"Performance: Hit@1 = {best['hit_at_1']:.2f}%, Hit@4 = {best['hit_at_4']:.2f}%, MRR = {best['mrr']:.4f}, Rejection = {best['rejection_rate']:.2f}%")
     if best['threshold'] == 0.30:
-        print("Selection Reason: Threshold 0.30 provides optimal candidate recall without allowing noisy unrelated chunks, enabling Cohere to surface ground-truth chunks at rank 1.")
+        print("Selection Reason: Distance threshold 0.30 achieves 100% out-of-scope rejection while maintaining strong retrieval recall, enabling Cohere reranking to surface the ground truth at rank 1.")
     elif best['threshold'] == 0.40:
-        print("Selection Reason: Threshold 0.40 maximizes candidate recall, letting Cohere's cross-encoder accurately rerank the most relevant chunks.")
+        print("Selection Reason: Distance threshold 0.40 maximizes candidate recall for cross-encoder reranking, though with lower out-of-scope precision if distances overlap.")
     else:
-        print("Selection Reason: Threshold 0.20 strictly filters vector candidates to high-confidence chunks, minimizing irrelevant context.")
-    print("=" * 55 + "\n")
+        print("Selection Reason: Distance threshold 0.20 strictly filters vector candidates to high-confidence chunks, maximizing rejection but potentially discarding edge in-scope chunks.")
+    print("=" * 65 + "\n")
 
 
 def main():

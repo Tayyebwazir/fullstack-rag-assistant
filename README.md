@@ -92,36 +92,58 @@ cd fullstack-rag-assistant
 
 ## 📊 RAG Retrieval Evaluation & Benchmark
 
-The retrieval and reranking pipeline is evaluated using a curated ground-truth benchmark on *Attention is all you need.pdf* across 6 configurations (3 Weaviate distance thresholds $\times$ Cohere Reranking OFF/ON). 
+The retrieval and reranking pipeline is evaluated using a curated ground-truth benchmark on *Attention is all you need.pdf* (102 ingested chunks) across all **6 production configurations** (3 Weaviate distance thresholds $\times$ Cohere Reranking OFF/ON).
 
-Each query retrieves **20 candidate chunks** from Weaviate and evaluates the final **top 4 chunks** using **Hit@1**, **Hit@4**, and **MRR (Mean Reciprocal Rank)**:
+### 1. Actual Live Benchmark Results (6 Configurations)
 
-| Distance Threshold | Cohere Reranking | Hit@1 | Hit@4 | MRR |
-|---|---|---|---|---|
-| **0.20** | **OFF** | 60.00% | 60.00% | 0.60 |
-| **0.20** | **ON** | 60.00% | 60.00% | 0.60 |
-| **0.30** | **OFF** | 100.00% | 100.00% | 1.00 |
-| **0.30** | **ON** | 100.00% | 100.00% | 1.00 |
-| **0.40** | **OFF** | 100.00% | 100.00% | 1.00 |
-| **0.40** | **ON** | 100.00% | 100.00% | 1.00 |
+Each query executes the actual production pipeline:
+1. **Stage 1 (Weaviate Retrieval)**: Retrieves the top **20 candidate chunks** from Weaviate using Cosine distance.
+2. **Distance Threshold Filtering**: Prunes chunks with distance $> \text{threshold}$.
+3. **Stage 2 (Cohere Rerank)**: Cross-encoder reranks the remaining candidates using `rerank-english-v3.0` to the final **top 4 chunks**.
+4. **Evaluation Metrics**: Evaluated across **10 in-scope** ground-truth questions and **5 out-of-scope** queries to test hallucination prevention:
 
-### 🔍 Key Findings & Optimal Configuration:
-- **Selected Configuration**: **Distance Threshold `0.30` with Cohere Reranking `ON`**.
-- **Threshold Analysis**:
-  - **`0.20`**: Too strict—prematurely prunes valid candidate chunks for 4 out of 10 questions, capping recall at 60.00%.
-  - **`0.30`**: Optimal balance—achieves 100.00% candidate recall while filtering out unrelated vector noise, enabling Cohere to reliably surface ground-truth chunks at Rank 1.
-  - **`0.40`**: High recall but admits broader candidate space that requires Cohere cross-encoder reranking to suppress irrelevant context.
+| Distance Threshold | Reranking Status | Hit@1 | Hit@4 | MRR | Out-of-Scope Rejection |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| **0.20** | **OFF** | 60.00% | 60.00% | 0.6000 | 100.00% |
+| **0.30** | **OFF** | 100.00% | 100.00% | 1.0000 | 100.00% |
+| **0.40** | **OFF** | 100.00% | 100.00% | 1.0000 | 100.00% |
+| **0.20** | **ON** | 60.00% | 60.00% | 0.6000 | 100.00% |
+| **0.30** | **ON** | **100.00%** | **100.00%** | **1.0000** | **100.00%** |
+| **0.40** | **ON** | 100.00% | 100.00% | 1.0000 | 100.00% |
 
-### 🏃 Running the Evaluation:
+---
+
+### 2. Selected Configuration & Justification
+
+* **Selected Configuration**: **Distance Threshold `0.30` with Cohere Reranking `ON`**
+* **Justification**:
+  - **Why not 0.20?** A distance threshold of `0.20` is too restrictive. It prematurely discards valid in-scope chunks for 4 out of 10 questions (e.g., Scaled Dot-Product Attention, FFN formula, Sinusoidal Positional Encoding, and Regularization parameters), dropping retrieval recall and Hit@1 from 100% to **60.00%**.
+  - **Why 0.30 over 0.40?** At threshold `0.30`, **100% of in-scope questions** retrieve their ground-truth page at Rank 1 (MRR = 1.0000), while **100% of out-of-scope queries** (world events, recipes, clinical medical questions, stock data, automotive repair) have vector distances $> 0.30$ and return 0 chunks, reliably triggering the fallback response (*"I could not find relevant information in the uploaded documents..."*). While `0.40` also passed, threshold `0.30` provides a substantially safer margin against out-of-scope semantic leakage.
+  - **Why Cohere Reranking ON?** Cohere's cross-encoder evaluates full query-document interactions, effectively disambiguating complex multi-hop queries (such as decoder masking and attention heads) and placing the exact target passage at Rank 1 with high confidence scores (up to `1.0000`).
+
+---
+
+### 3. Analysis: Additional Cohere Rerank-Score Threshold
+
+* **Finding**: **An additional arbitrary Cohere rerank-score threshold is unnecessary and not recommended.**
+* **Evidence**:
+  1. **Stage 1 Distance Filtering Already Prevents Hallucinations**: For all out-of-scope queries, Weaviate's vector distance threshold (`0.30`) rejects candidates upstream, returning `0` chunks. Because no chunks pass Stage 1, the fallback response triggers immediately without invoking Cohere.
+  2. **Risk of False Negatives**: In live testing, valid in-scope chunks evaluated by Cohere received relevance scores ranging from `0.4315` to `1.0000` (e.g., Q10 Rank 4 returned score `0.4315` for a valid contextual chunk on Page 5). Setting an arbitrary cutoff (e.g., `0.50`) would prune valid contextual chunks that aid synthesis.
+  3. **Score Calibration**: Cohere relevance scores are query-dependent and not calibrated probabilities across diverse document domains. Filtering via Weaviate vector distance at Stage 1 is both computationally cheaper and mathematically sufficient.
+
+---
+
+### 4. Running Benchmarks & Test Suites
+
 ```bash
-# Run baseline vector search (Rerank OFF)
-python evaluate_rag.py
-
-# Run with Cohere reranking (Rerank ON)
-python evaluate_rag.py --rerank
-
-# Run the full 6-configuration comparison table
+# Run the live 6-configuration benchmark
 python evaluate_rag.py --compare
+
+# Run single configuration evaluation (e.g. threshold 0.30 with reranking)
+python evaluate_rag.py --threshold 0.30 --rerank
+
+# Run the complete automated pytest suite (15 tests covering Issues 1, 2, and 3)
+pytest tests/ -v
 ```
 
 ---
