@@ -29,53 +29,6 @@ Respond naturally, politely and concisely to the following greeting or general q
 Remind the user briefly that they can ask questions about their uploaded PDF documents."""
 
 
-def _check_and_log_benchmark_evaluation(question: str, selected_chunks: list[dict]):
-    """If a live query in FastAPI matches a benchmark question, log Expected/Hit Rank/Precision."""
-    import inspect
-    for frame_info in inspect.stack()[1:6]:
-        if "evaluate_rag.py" in frame_info.filename or "test_evaluate_rag.py" in frame_info.filename:
-            return  # evaluation scripts format their own output
-
-    try:
-        from evaluate_rag import EVAL_SET
-    except Exception:
-        return
-
-    clean_q = question.strip().lower()
-    for item in EVAL_SET:
-        eval_q = item["question"].strip().lower()
-        if clean_q == eval_q or eval_q in clean_q or clean_q in eval_q:
-            qid = item["id"]
-            expected = item.get("expected_pages", [])
-            is_oos = item.get("out_of_scope", False)
-            retrieved_pages = [c.get("page") for c in selected_chunks]
-
-            print(f"\n{'=' * 75}", flush=True)
-            if is_oos:
-                correctly_rejected = len(selected_chunks) == 0
-                status = "PASS" if correctly_rejected else "FAIL"
-                action = 'Triggered "I don\'t know"' if correctly_rejected else f"Retrieved {len(selected_chunks)} chunks"
-                print(f"[Benchmark Match] [{status}] Q{qid:02d}: {item['question']} [Out-of-Scope]", flush=True)
-                print(f"       Expected: None (I don't know) | Retrieved: {retrieved_pages} | Status: {action}", flush=True)
-            else:
-                first_hit_rank_val = None
-                for rank, p in enumerate(retrieved_pages, start=1):
-                    if p in expected:
-                        first_hit_rank_val = rank
-                        break
-
-                first_hit_rank_str = str(first_hit_rank_val) if first_hit_rank_val is not None else "-"
-                correct_chunks = sum(1 for p in retrieved_pages if p in expected)
-                total_chunks = len(selected_chunks)
-                precision_k = (correct_chunks / total_chunks * 100) if total_chunks > 0 else 0.0
-                status = "PASS" if first_hit_rank_val is not None else "FAIL"
-
-                print(f"[Benchmark Match] [{status}] Q{qid:02d}: {item['question']}", flush=True)
-                print(f"       Expected: {expected} | Retrieved: {retrieved_pages} | Hit Rank: {first_hit_rank_str} | Precision@{total_chunks}: {precision_k:.1f}% ({correct_chunks}/{total_chunks})", flush=True)
-            print(f"{'=' * 75}\n", flush=True)
-            break
-
-
 def prepare_rag_pipeline(
     question: str,
     tenant_id: str,
@@ -97,7 +50,6 @@ def prepare_rag_pipeline(
         distance_threshold=distance_threshold,
     )
     if not chunks:
-        _check_and_log_benchmark_evaluation(question, [])
         return {
             "has_chunks": False,
             "chunks": [],
@@ -116,7 +68,6 @@ def prepare_rag_pipeline(
             top_k=top_k,
         )
     selected_chunks = reranked if reranked else chunks[:top_k]
-    _check_and_log_benchmark_evaluation(question, selected_chunks)
 
     context_parts = [
         f"[Document: {chunk.get('source', 'Unknown')} | Page: {chunk.get('page', 'N/A')}]\n{chunk.get('content', '').strip()}"
