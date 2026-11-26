@@ -161,7 +161,7 @@ def answer_question(
     client = get_gemini_client()
 
     if is_conversational_or_greeting(question):
-        greeting_prompt = get_greeting_prompt(question, tenant_id=tenant_id)
+        greeting_prompt = get_greeting_prompt(question)
         resp = client.models.generate_content(
             model=GENERATION_MODEL,
             contents=greeting_prompt,
