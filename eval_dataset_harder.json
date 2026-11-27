@@ -182,12 +182,12 @@
   {
     "id": 19,
     "type": "multi_hop",
-    "question": "What is the difference between the number of attention heads in the base model and the big model, and what are the corresponding embedding dimensions?",
+    "question": "In Table 3, what are the number of attention heads and model dimensions (d_model) for the base model versus the big model?",
     "expected_doc": "Attention is all you need.pdf",
-    "expected_pages": [8, 9],
-    "required_keywords": ["h=8", "h=16", "d_model=512", "d_model=1024"],
+    "expected_pages": [9],
+    "required_keywords": ["base", "big", "512", "1024"],
     "out_of_scope": false,
-    "note": "Multi-hop: base model (Table 2 p8) vs big model (Table 3 p9) comparison"
+    "note": "Table 3 on p9: base (512, 8 heads) vs big (1024, 16 heads)"
   },
   {
     "id": 20,
@@ -318,5 +318,45 @@
     "required_keywords": [],
     "out_of_scope": true,
     "note": "Computer history — adjacent domain but no match in doc"
+  },
+  {
+    "id": 33,
+    "type": "exact_term",
+    "question": "According to the Machine Learning notes, how does machine learning develop algorithms to make predictions on new data?",
+    "expected_doc": "Machine-learning-Notes-5.webp",
+    "expected_pages": [1],
+    "required_keywords": ["intelligence", "hidden patterns", "datasets"],
+    "out_of_scope": false,
+    "note": "Covers Machine-learning-Notes-5.webp in tenant db261c85-2d6f-4a93-8aeb-1f725a5e30cc"
+  },
+  {
+    "id": 34,
+    "type": "paraphrase",
+    "question": "Which real-world domains and autonomous systems are listed in the handwritten notes as applications of machine learning?",
+    "expected_doc": "Machine-learning-Notes-5.webp",
+    "expected_pages": [1],
+    "required_keywords": ["speech", "fraud detection", "autonomous"],
+    "out_of_scope": false,
+    "note": "Paraphrase covering Machine-learning-Notes-5.webp"
+  },
+  {
+    "id": 35,
+    "type": "exact_term",
+    "question": "What is the topic, date, time, and venue of the Inter-School Debate Competition at Sunrise Public School?",
+    "expected_doc": "images.png",
+    "expected_pages": [1],
+    "required_keywords": ["Sunrise Public School", "25th September", "auditorium", "Boon or Bane"],
+    "out_of_scope": false,
+    "note": "Covers images.png in tenant db261c85-2d6f-4a93-8aeb-1f725a5e30cc"
+  },
+  {
+    "id": 36,
+    "type": "paraphrase",
+    "question": "By what deadline must students submit their names for the school debate, and what awards are given to participants and winners?",
+    "expected_doc": "images.png",
+    "expected_pages": [1],
+    "required_keywords": ["15th September", "Certificates", "trophies"],
+    "out_of_scope": false,
+    "note": "Paraphrase covering images.png"
   }
 ]

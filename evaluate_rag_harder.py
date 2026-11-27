@@ -373,7 +373,7 @@ def evaluate_single_configuration(
         pipeline_result = prepare_rag_pipeline(
             question=q,
             tenant_id=tenant_id,
-            source_filter=expected_doc,
+            source_filter=None,
             use_rerank=use_rerank,
             top_k=top_k,
             distance_threshold=distance_threshold,
