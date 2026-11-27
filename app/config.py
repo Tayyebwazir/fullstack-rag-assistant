@@ -23,6 +23,9 @@ RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "4"))
 COHERE_API_KEY = os.getenv("COHERE_API_KEY", "")
 RERANK_MODEL = os.getenv("RERANK_MODEL", "rerank-english-v3.0")
 DISTANCE_THRESHOLD = float(os.getenv("DISTANCE_THRESHOLD", "0.30"))
+SEARCH_MODE = os.getenv("SEARCH_MODE", "vector").strip().lower()
+HYBRID_ALPHA = float(os.getenv("HYBRID_ALPHA", "0.50"))
+HYBRID_SCORE_THRESHOLD = float(os.getenv("HYBRID_SCORE_THRESHOLD", "0.0"))
 
 
 

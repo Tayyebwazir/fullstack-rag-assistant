@@ -9,6 +9,9 @@ from app.config import (
     WEAVIATE_URL,
     WEAVIATE_API_KEY,
     DISTANCE_THRESHOLD,
+    SEARCH_MODE,
+    HYBRID_ALPHA,
+    HYBRID_SCORE_THRESHOLD,
 )
 
 
@@ -232,7 +235,18 @@ def search_chunks(
     source_filter: str | None = None,
     limit: int = 4,
     distance_threshold: float = DISTANCE_THRESHOLD,
+    query_text: str | None = None,
+    search_mode: str = SEARCH_MODE,
+    alpha: float = HYBRID_ALPHA,
+    hybrid_score_threshold: float = HYBRID_SCORE_THRESHOLD,
 ) -> list[dict]:
+    """Searches tenant chunks using either vector-only (near_vector) or native Weaviate hybrid (BM25 + vector)."""
+    mode = (search_mode or "vector").strip().lower()
+    if mode not in ("vector", "hybrid"):
+        raise ValueError(f"Unsupported search_mode '{search_mode}'. Expected 'vector' or 'hybrid'.")
+
+    use_hybrid = mode == "hybrid" and bool(query_text and query_text.strip())
+
     filters = None
     if source_filter and source_filter != "all":
         filters = Filter.by_property("source").equal(source_filter)
@@ -249,12 +263,24 @@ def search_chunks(
             target_tenant = ensure_tenant(collection, tenant_id)
             tenant_collection = collection.with_tenant(target_tenant)
 
-            response = tenant_collection.query.near_vector(
-                near_vector=query_vector,
-                filters=filters,
-                limit=limit,
-                return_metadata=MetadataQuery(distance=True, certainty=True),
-            )
+            if use_hybrid:
+                response = tenant_collection.query.hybrid(
+                    query=query_text.strip(),
+                    vector=query_vector,
+                    alpha=alpha,
+                    query_properties=["content"],
+                    max_vector_distance=distance_threshold,
+                    filters=filters,
+                    limit=limit,
+                    return_metadata=MetadataQuery(score=True, explain_score=True, distance=True),
+                )
+            else:
+                response = tenant_collection.query.near_vector(
+                    near_vector=query_vector,
+                    filters=filters,
+                    limit=limit,
+                    return_metadata=MetadataQuery(distance=True, certainty=True),
+                )
             break
         except Exception as exc:
             last_exc = exc
@@ -268,9 +294,17 @@ def search_chunks(
     filtered_chunks = []
     for obj in response.objects:
         dist = getattr(obj.metadata, "distance", None)
-        # Cut off: Reject chunks with distance greater than threshold
-        if dist is not None and dist > distance_threshold:
-            continue
+        score = getattr(obj.metadata, "score", None)
+        explain_score = getattr(obj.metadata, "explain_score", None)
+
+        if use_hybrid:
+            # Hybrid fusion scores are similarity-based (higher is better); never apply cosine distance cutoff to score.
+            if hybrid_score_threshold > 0.0 and score is not None and score < hybrid_score_threshold:
+                continue
+        else:
+            # Vector-only cut off: Reject chunks with cosine distance greater than threshold
+            if dist is not None and dist > distance_threshold:
+                continue
 
         filtered_chunks.append({
             "source": obj.properties.get("source", "unknown"),
@@ -281,6 +315,8 @@ def search_chunks(
             "tenant": target_tenant,
             "distance": dist,
             "certainty": getattr(obj.metadata, "certainty", None),
+            "score": score,
+            "explain_score": explain_score,
         })
 
     return filtered_chunks

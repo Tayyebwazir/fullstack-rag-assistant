@@ -1,8 +1,11 @@
 from app.config import (
     DISTANCE_THRESHOLD,
     GENERATION_MODEL,
+    HYBRID_ALPHA,
+    HYBRID_SCORE_THRESHOLD,
     RERANK_TOP_K,
     RETRIEVAL_TOP_K,
+    SEARCH_MODE,
 )
 from app.services.embeddings import embed_query
 from app.services.vector_store import search_chunks
@@ -36,19 +39,35 @@ def prepare_rag_pipeline(
     use_rerank: bool = True,
     top_k: int = RERANK_TOP_K,
     distance_threshold: float = DISTANCE_THRESHOLD,
+    search_mode: str = SEARCH_MODE,
+    alpha: float = HYBRID_ALPHA,
+    hybrid_score_threshold: float = HYBRID_SCORE_THRESHOLD,
 ) -> dict:
     """Shared RAG pipeline executing embedding, retrieval (20 chunks), distance filtering,
     optional Cohere reranking (top 4 chunks), context building, and prompt formatting.
     Used by /ask, /ask-stream, and evaluation workflows.
     """
     query_vector = embed_query(question)
-    chunks = search_chunks(
-        query_vector=query_vector,
-        tenant_id=tenant_id,
-        source_filter=source_filter,
-        limit=RETRIEVAL_TOP_K,
-        distance_threshold=distance_threshold,
-    )
+    if (search_mode or "vector").strip().lower() == "hybrid":
+        chunks = search_chunks(
+            query_vector=query_vector,
+            tenant_id=tenant_id,
+            source_filter=source_filter,
+            limit=RETRIEVAL_TOP_K,
+            distance_threshold=distance_threshold,
+            query_text=question,
+            search_mode="hybrid",
+            alpha=alpha,
+            hybrid_score_threshold=hybrid_score_threshold,
+        )
+    else:
+        chunks = search_chunks(
+            query_vector=query_vector,
+            tenant_id=tenant_id,
+            source_filter=source_filter,
+            limit=RETRIEVAL_TOP_K,
+            distance_threshold=distance_threshold,
+        )
     if not chunks:
         return {
             "has_chunks": False,

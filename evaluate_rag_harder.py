@@ -33,9 +33,12 @@ from app.config import (
     CHUNK_SIZE,
     COHERE_API_KEY,
     DISTANCE_THRESHOLD,
+    HYBRID_ALPHA,
+    HYBRID_SCORE_THRESHOLD,
     PDF_PATH,
     RERANK_TOP_K,
     RETRIEVAL_TOP_K,
+    SEARCH_MODE,
     TOP_K,
 )
 from app.services.chunker import chunk_pages
@@ -55,6 +58,7 @@ from app.services.vector_store import (
 # ---------------------------------------------------------------------------
 DEFAULT_DATASET_PATH = BASE_DIR / "eval_dataset_harder.json"
 COMPARISON_THRESHOLDS = [0.20, 0.30, 0.40]
+HYBRID_ALPHAS = [0.25, 0.50, 0.75]
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +339,9 @@ def evaluate_single_configuration(
     top_k: int = RERANK_TOP_K,
     verbose: bool = True,
     print_summary: bool = True,
+    search_mode: str = "vector",
+    alpha: float = HYBRID_ALPHA,
+    hybrid_score_threshold: float = HYBRID_SCORE_THRESHOLD,
 ) -> dict:
     """
     Evaluates one configuration (threshold + reranking) across the provided eval_set.
@@ -370,7 +377,7 @@ def evaluate_single_configuration(
         q_type = item.get("type", "unknown")
 
         t0 = time.perf_counter()
-        pipeline_result = prepare_rag_pipeline(
+        pipeline_kwargs = dict(
             question=q,
             tenant_id=tenant_id,
             source_filter=None,
@@ -378,6 +385,11 @@ def evaluate_single_configuration(
             top_k=top_k,
             distance_threshold=distance_threshold,
         )
+        if (search_mode or "vector").strip().lower() == "hybrid":
+            pipeline_kwargs["search_mode"] = "hybrid"
+            pipeline_kwargs["alpha"] = alpha
+            pipeline_kwargs["hybrid_score_threshold"] = hybrid_score_threshold
+        pipeline_result = prepare_rag_pipeline(**pipeline_kwargs)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         latencies_ms.append(elapsed_ms)
 
@@ -470,6 +482,8 @@ def evaluate_single_configuration(
     )
     metrics["threshold"] = distance_threshold
     metrics["reranking"] = "ON" if use_rerank else "OFF"
+    metrics["search_mode"] = search_mode
+    metrics["alpha"] = alpha if search_mode == "hybrid" else None
     metrics["failed_questions"] = failed_questions
 
     if print_summary:
@@ -680,6 +694,8 @@ def run_evaluation(
     top_k: int = RERANK_TOP_K,
     use_rerank: bool = False,
     distance_threshold: float = DISTANCE_THRESHOLD,
+    search_mode: str = SEARCH_MODE,
+    alpha: float = HYBRID_ALPHA,
 ) -> dict:
     """Evaluates one configuration and prints verbose results."""
     return evaluate_single_configuration(
@@ -690,7 +706,69 @@ def run_evaluation(
         top_k=top_k,
         verbose=True,
         print_summary=True,
+        search_mode=search_mode,
+        alpha=alpha,
     )
+
+
+def run_hybrid_comparison(
+    tenant_id: str,
+    eval_set: list[dict],
+    top_k: int = RERANK_TOP_K,
+    distance_threshold: float = 0.40,
+) -> list[dict]:
+    """Compares vector-only baselines (0.30 & 0.40) against hybrid search (alpha=0.25, 0.50, 0.75) with rerank OFF/ON."""
+    configs = [
+        ("vector", None, 0.30, False),
+        ("vector", None, 0.30, True),
+        ("vector", None, 0.40, False),
+        ("vector", None, 0.40, True),
+    ]
+    for a in HYBRID_ALPHAS:
+        configs.append(("hybrid", a, distance_threshold, False))
+        configs.append(("hybrid", a, distance_threshold, True))
+
+    print(f"\n{'=' * 105}", flush=True)
+    print(" VECTOR-ONLY VS HYBRID SEARCH (BM25 + VECTOR) COMPARISON", flush=True)
+    print(f" Tenant: {tenant_id} | Dataset: {len(eval_set)} Qs | Stage-1: {RETRIEVAL_TOP_K} | Top-K: {top_k}", flush=True)
+    print(f" Hybrid Alphas: {HYBRID_ALPHAS} | Max Vector Distance: {distance_threshold:.2f}", flush=True)
+    print(f"{'=' * 105}\n", flush=True)
+
+    results = []
+    for mode, alpha_val, thresh, use_rerank in configs:
+        label = f"mode={mode}" + (f" alpha={alpha_val:.2f}" if alpha_val is not None else "")
+        print(f"\n--- Config: {label} | max_dist={thresh:.2f} | Cohere={'ON' if use_rerank else 'OFF'} ---", flush=True)
+        res = evaluate_single_configuration(
+            tenant_id=tenant_id,
+            eval_set=eval_set,
+            distance_threshold=thresh,
+            use_rerank=use_rerank,
+            top_k=top_k,
+            verbose=True,
+            print_summary=False,
+            search_mode=mode,
+            alpha=alpha_val if alpha_val is not None else HYBRID_ALPHA,
+        )
+        results.append(res)
+
+    print("\n" + "=" * 112)
+    print(" VECTOR-ONLY VS HYBRID SEARCH — COMPARISON TABLE")
+    print("=" * 112)
+    print("| Mode   | Alpha | MaxDist | Rerank | Hit@1 | Hit@4 | MRR   | OOS Reject | Evidence | Avg Latency | Q15 |")
+    print("|--------|-------|---------|--------|-------|-------|-------|------------|----------|-------------|-----|")
+    for r in results:
+        alpha_str = f"{r['alpha']:.2f}" if r.get("alpha") is not None else "N/A  "
+        ev = f"{r['complete_evidence_rate']:.1f}%" if r["complete_evidence_rate"] is not None else "N/A"
+        lat = f"{r['avg_latency_ms']:.0f}ms" if r["avg_latency_ms"] is not None else "N/A"
+        q15_failed = any(fq["id"] == 15 for fq in r.get("failed_questions", []))
+        q15_str = "✗" if q15_failed else "✓"
+        print(
+            f"| {r['search_mode']:6s} | {alpha_str:5s} | {r['threshold']:.2f}    | {r['reranking']:6s} "
+            f"| {r['hit_at_1']:5.1f}% | {r['hit_at_4']:5.1f}% | {r['mrr']:.3f} "
+            f"| {r['rejection_rate']:9.1f}% | {ev:8s} | {lat:11s} | {q15_str:3s} |"
+        )
+    print("=" * 112 + "\n")
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +777,7 @@ def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Harder RAG Evaluation — doc+page+keyword hit detection, 6-config comparison"
+        description="Harder RAG Evaluation — doc+page+keyword hit detection, 6-config & hybrid comparison"
     )
     parser.add_argument("--tenant", type=str, default=None, help="Weaviate tenant ID")
     parser.add_argument(
@@ -712,8 +790,20 @@ def main():
     )
     parser.add_argument("--rerank", action="store_true", help="Enable Cohere reranking")
     parser.add_argument(
+        "--search-mode", type=str, default=SEARCH_MODE, choices=["vector", "hybrid"],
+        help=f"Retrieval mode: vector or hybrid (default: {SEARCH_MODE})"
+    )
+    parser.add_argument(
+        "--alpha", type=float, default=HYBRID_ALPHA,
+        help=f"Hybrid alpha weight (0=BM25, 1=Vector, default: {HYBRID_ALPHA})"
+    )
+    parser.add_argument(
         "--compare", action="store_true",
         help="Run all 6 configurations (3 thresholds × rerank OFF/ON)"
+    )
+    parser.add_argument(
+        "--compare-hybrid", action="store_true",
+        help="Compare vector-only (0.30, 0.40) vs hybrid (alpha 0.25, 0.50, 0.75) with rerank OFF/ON"
     )
     parser.add_argument("--ingest", action="store_true", help="Force re-ingest PDF before evaluation")
     parser.add_argument(
@@ -737,13 +827,21 @@ def main():
         ensure_document_ingested(tenant_id=tenant, pdf_file=PDF_PATH)
 
     try:
-        if args.compare:
+        if args.compare_hybrid:
+            run_hybrid_comparison(
+                tenant_id=tenant,
+                eval_set=eval_set,
+                top_k=args.top_k,
+                distance_threshold=args.threshold if args.threshold != DISTANCE_THRESHOLD else 0.40,
+            )
+        elif args.compare:
             run_comparison(tenant_id=tenant, eval_set=eval_set, top_k=args.top_k)
         else:
             print(f"\n{'=' * 80}", flush=True)
             print(f" RAG HARDER RETRIEVAL EVALUATION", flush=True)
             print(
-                f" Tenant: {tenant} | Dataset: {len(eval_set)} Qs | Top-K: {args.top_k} "
+                f" Tenant: {tenant} | Dataset: {len(eval_set)} Qs | Mode: {args.search_mode} "
+                f"| Alpha: {args.alpha:.2f} | Top-K: {args.top_k} "
                 f"| Reranker: {'ON' if args.rerank else 'OFF'} | Threshold: {args.threshold:.2f}",
                 flush=True,
             )
@@ -754,6 +852,8 @@ def main():
                 top_k=args.top_k,
                 use_rerank=args.rerank,
                 distance_threshold=args.threshold,
+                search_mode=args.search_mode,
+                alpha=args.alpha,
             )
     finally:
         close_weaviate_client()
