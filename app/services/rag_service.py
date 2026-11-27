@@ -16,7 +16,7 @@ Rules:
 1. Answer questions ONLY using the provided context.
 2. Do not use outside knowledge.
 3. If the context does not contain the answer, say: "I don't know based on the provided documents."
-4. Always cite the source document and page number.
+4. Write a clean, direct answer without inline document names or page numbers (sources are already listed separately below).
 5. Do not invent information or citations.
 """
 
