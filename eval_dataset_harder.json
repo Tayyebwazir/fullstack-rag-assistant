@@ -1,0 +1,322 @@
+[
+  {
+    "id": 1,
+    "type": "exact_term",
+    "question": "What is the mathematical equation for Scaled Dot-Product Attention?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [4],
+    "required_keywords": ["Attention", "softmax", "sqrt", "d_k"],
+    "out_of_scope": false,
+    "note": "Verbatim from paper; tests basic retrieval"
+  },
+  {
+    "id": 2,
+    "type": "paraphrase",
+    "question": "How does the Transformer compute attention scores between queries, keys, and values by scaling with the square root of the key dimension?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [4],
+    "required_keywords": ["softmax", "d_k", "queries", "keys", "values"],
+    "out_of_scope": false,
+    "note": "Paraphrase of Q1 using different wording - tests semantic retrieval"
+  },
+  {
+    "id": 3,
+    "type": "exact_term",
+    "question": "How is Multi-Head Attention defined and how are multiple heads concatenated?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [4, 5],
+    "required_keywords": ["MultiHead", "Concat", "head_i", "W"],
+    "out_of_scope": false,
+    "note": "Multi-page: pages 4 and 5 needed together"
+  },
+  {
+    "id": 4,
+    "type": "paraphrase",
+    "question": "What technique allows the model to jointly attend to information from different representation subspaces at different positions?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [4, 5],
+    "required_keywords": ["multi-head", "subspaces", "attention"],
+    "out_of_scope": false,
+    "note": "Paraphrase of multi-head attention concept"
+  },
+  {
+    "id": 5,
+    "type": "exact_term",
+    "question": "What is the formula for the Position-wise Feed-Forward Networks (FFN)?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [5],
+    "required_keywords": ["FFN", "ReLU", "W_1", "W_2", "b_1", "b_2"],
+    "out_of_scope": false,
+    "note": "Exact formula retrieval"
+  },
+  {
+    "id": 6,
+    "type": "paraphrase",
+    "question": "Describe the two linear transformations with a ReLU activation applied separately to each position in the feed-forward sublayer.",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [5],
+    "required_keywords": ["ReLU", "linear", "feed-forward"],
+    "out_of_scope": false,
+    "note": "Paraphrase of FFN formula using descriptive language"
+  },
+  {
+    "id": 7,
+    "type": "exact_term",
+    "question": "How are sinusoidal positional encodings calculated for even and odd dimensions?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [6],
+    "required_keywords": ["sin", "cos", "pos", "10000", "d_model"],
+    "out_of_scope": false,
+    "note": "Exact term: sine/cosine positional encoding formula"
+  },
+  {
+    "id": 8,
+    "type": "paraphrase",
+    "question": "What encoding scheme injects sequence order information into the model using periodic trigonometric functions that vary by dimension?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [6],
+    "required_keywords": ["positional", "sinusoidal", "encoding"],
+    "out_of_scope": false,
+    "note": "Paraphrase of positional encoding concept"
+  },
+  {
+    "id": 9,
+    "type": "multi_page",
+    "question": "According to Table 1, what is the maximum path length and per-layer complexity for self-attention, and why was this model architecture chosen over recurrent models?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [2, 6],
+    "required_keywords": ["O(1)", "O(n^2)", "sequential", "path length"],
+    "out_of_scope": false,
+    "note": "Multi-page: Table 1 is on p6; motivation is stated on p2"
+  },
+  {
+    "id": 10,
+    "type": "exact_term",
+    "question": "What hardware and training schedule were used to train the base model?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [7],
+    "required_keywords": ["P100", "GPU", "100000", "steps"],
+    "out_of_scope": false,
+    "note": "Specific hardware/schedule details"
+  },
+  {
+    "id": 11,
+    "type": "paraphrase",
+    "question": "What type of graphics processing units were used and for how many update steps was the base Transformer trained?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [7],
+    "required_keywords": ["GPU", "steps", "base"],
+    "out_of_scope": false,
+    "note": "Paraphrase of training hardware/schedule"
+  },
+  {
+    "id": 12,
+    "type": "exact_term",
+    "question": "What optimizer parameters and warmup steps schedule were used during training?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [7],
+    "required_keywords": ["Adam", "beta_1", "beta_2", "warmup_steps", "4000"],
+    "out_of_scope": false,
+    "note": "Optimizer hyperparameters on training page"
+  },
+  {
+    "id": 13,
+    "type": "paraphrase",
+    "question": "Which adaptive learning rate optimizer was used, and what were its first-order and second-order momentum hyperparameters?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [7],
+    "required_keywords": ["Adam", "beta_1", "beta_2"],
+    "out_of_scope": false,
+    "note": "Paraphrase of optimizer question using 'momentum' instead of 'beta'"
+  },
+  {
+    "id": 14,
+    "type": "exact_term",
+    "question": "What residual dropout rate and label smoothing value were applied for regularization?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["dropout", "0.1", "label smoothing", "0.1"],
+    "out_of_scope": false,
+    "note": "Exact regularization hyperparameters"
+  },
+  {
+    "id": 15,
+    "type": "paraphrase",
+    "question": "What probability was used to randomly suppress activations during training, and what soft-target penalty was applied to the cross-entropy loss?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["dropout", "label smoothing"],
+    "out_of_scope": false,
+    "note": "Paraphrase of regularization using 'suppress activations' and 'soft-target'"
+  },
+  {
+    "id": 16,
+    "type": "exact_term",
+    "question": "What BLEU score did the big Transformer achieve on the WMT 2014 English-to-German task?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["28.4", "BLEU", "English-to-German"],
+    "out_of_scope": false,
+    "note": "Exact numeric result from paper"
+  },
+  {
+    "id": 17,
+    "type": "paraphrase",
+    "question": "By how many BLEU points did the Transformer surpass previous state-of-the-art models on the German translation benchmark, and what was the final score?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["BLEU", "28.4", "English-German"],
+    "out_of_scope": false,
+    "note": "Paraphrase of BLEU score question"
+  },
+  {
+    "id": 18,
+    "type": "multi_hop",
+    "question": "How does the decoder prevent attending to future positions in masked multi-head attention, and how does the encoder use self-attention to relate all positions?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [3, 5],
+    "required_keywords": ["masking", "subsequent", "encoder", "self-attention"],
+    "out_of_scope": false,
+    "note": "Multi-hop: decoder masking (p5) + encoder self-attention description (p3)"
+  },
+  {
+    "id": 19,
+    "type": "multi_hop",
+    "question": "What is the difference between the number of attention heads in the base model and the big model, and what are the corresponding embedding dimensions?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8, 9],
+    "required_keywords": ["h=8", "h=16", "d_model=512", "d_model=1024"],
+    "out_of_scope": false,
+    "note": "Multi-hop: base model (Table 2 p8) vs big model (Table 3 p9) comparison"
+  },
+  {
+    "id": 20,
+    "type": "multi_page",
+    "question": "How does the Transformer's training cost compare to other architectures listed in Table 2, and what FLOPs-equivalent does the paper report?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8, 9],
+    "required_keywords": ["FLOPs", "training cost", "Table"],
+    "out_of_scope": false,
+    "note": "Multi-page: training cost spans Table 2 and Table 3 comparison"
+  },
+  {
+    "id": 21,
+    "type": "multi_hop",
+    "question": "What is the abstract motivation for the Transformer, and how does Table 1 specifically quantify the computational advantage of self-attention over recurrence?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [1, 6],
+    "required_keywords": ["attention", "recurrence", "O(1)", "sequential"],
+    "out_of_scope": false,
+    "note": "Multi-hop: abstract (p1) + Table 1 (p6) evidence"
+  },
+  {
+    "id": 22,
+    "type": "exact_term",
+    "question": "What three types of attention are used in the Transformer model?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [5],
+    "required_keywords": ["encoder-decoder", "encoder self-attention", "decoder self-attention"],
+    "out_of_scope": false,
+    "note": "Requires listing the three attention application modes"
+  },
+  {
+    "id": 23,
+    "type": "paraphrase",
+    "question": "In which three distinct ways does the Transformer architecture employ multi-head attention layers?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [5],
+    "required_keywords": ["encoder", "decoder", "cross-attention"],
+    "out_of_scope": false,
+    "note": "Paraphrase of Q22 — 'employ' vs 'use', 'distinct ways' vs 'types'"
+  },
+  {
+    "id": 24,
+    "type": "exact_term",
+    "question": "What English-to-French BLEU score did the big model achieve and how much training cost was required?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["41.0", "English-to-French", "BLEU"],
+    "out_of_scope": false,
+    "note": "French translation result — tests distinct numeric retrieval"
+  },
+  {
+    "id": 25,
+    "type": "paraphrase",
+    "question": "On which translation language pair did the big Transformer model score 41.0 BLEU, and what was the approximate cost measured in floating-point operations?",
+    "expected_doc": "Attention is all you need.pdf",
+    "expected_pages": [8],
+    "required_keywords": ["41.0", "French", "BLEU", "FLOPs"],
+    "out_of_scope": false,
+    "note": "Paraphrase of Q24"
+  },
+  {
+    "id": 26,
+    "type": "out_of_scope",
+    "question": "Who won the 2022 FIFA World Cup in Qatar?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Sports — clearly unrelated to any uploaded document"
+  },
+  {
+    "id": 27,
+    "type": "out_of_scope",
+    "question": "What is the recipe and baking temperature for chocolate chip cookies?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Food/cooking — unrelated"
+  },
+  {
+    "id": 28,
+    "type": "out_of_scope",
+    "question": "What are the common symptoms and clinical treatments for acute appendicitis?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Medical — unrelated"
+  },
+  {
+    "id": 29,
+    "type": "out_of_scope",
+    "question": "What was the closing stock price of Apple on December 31, 2020?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Finance — unrelated"
+  },
+  {
+    "id": 30,
+    "type": "out_of_scope",
+    "question": "How do you change the engine oil and filter in a 2018 Honda Civic?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Automotive maintenance — unrelated"
+  },
+  {
+    "id": 31,
+    "type": "out_of_scope",
+    "question": "What is the GDP of Germany in 2023 according to the World Bank?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Economics — unrelated; tests harder false-positive avoidance since paper references costs"
+  },
+  {
+    "id": 32,
+    "type": "out_of_scope",
+    "question": "What programming language was invented by Guido van Rossum and in what year?",
+    "expected_doc": null,
+    "expected_pages": [],
+    "required_keywords": [],
+    "out_of_scope": true,
+    "note": "Computer history — adjacent domain but no match in doc"
+  }
+]
